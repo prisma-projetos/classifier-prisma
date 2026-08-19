@@ -1,0 +1,6 @@
+psycopg[binary]
+python-dotenv
+PyYAML
+pika
+rapidfuzz
+pytest
