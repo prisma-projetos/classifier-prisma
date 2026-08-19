@@ -95,6 +95,13 @@ def main() -> int:
                 model_name=model_name,
                 model_version=model_version,
             )
+            # Sem isso, o resultado fica só na transação implícita da
+            # conexão (aberta pela própria checagem de idempotência) e é
+            # perdido silenciosamente quando a conexão fecha logo abaixo
+            # sem commit -- persist_classification_result usa
+            # `with conn.transaction()`, que vira SAVEPOINT (não BEGIN) já
+            # havendo transação aberta, então não comita a conexão sozinho.
+            message_conn.commit()
         finally:
             message_conn.close()
 
