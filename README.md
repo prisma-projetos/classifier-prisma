@@ -89,6 +89,8 @@ python src/notify_analyser.py
 
 O consumidor (`src/main.py`) aplica migrations do System DB e sincroniza `config/entities.yaml` para o banco automaticamente ao subir — não é preciso rodar nada manualmente antes.
 
+**Se você já tem um Postgres local (ex.: instalado via Homebrew, ouvindo em `5432`)**: `docker compose up -d` sobe um SEGUNDO Postgres no mesmo host/porta, e qual dos dois efetivamente atende `localhost:5432` fica ambíguo (depende de como o Docker Desktop/OrbStack expõe a porta). Nesse caso, suba só o RabbitMQ (`docker compose up -d rabbitmq`) e use o Postgres que já está rodando — ele funciona normalmente, o classifier só precisa que `POSTGRES_HOST`/`POSTGRES_PORT` no `.env` apontem pra ele.
+
 ## Variáveis de ambiente
 
 Todas descritas com comentário completo em [`.env.example`](.env.example). Resumo:
