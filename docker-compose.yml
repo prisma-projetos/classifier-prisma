@@ -11,5 +11,32 @@ services:
     volumes:
       - classifier_pgdata:/var/lib/postgresql/data
 
+  # ATENCAO: este RabbitMQ e SO PARA DESENVOLVIMENTO LOCAL. A topologia
+  # (fila/exchange/bind) e provisionada aqui via definitions.json só para
+  # permitir testar o consumidor/publisher deste repositório ponta a ponta.
+  # Em produção o Classifier NÃO declara topologia nenhuma (ver
+  # src/rabbitmq_consumer.py e src/rabbitmq_publisher.py) — quem cria e
+  # mantém a topologia real é o time de DevOps, fora deste repositório.
+  # Detalhes e avisos sobre nomes ainda não confirmados (fronteira
+  # Classifier -> Analyser) em docker/rabbitmq/README.md.
+  rabbitmq:
+    image: rabbitmq:3-management
+    restart: unless-stopped
+    environment:
+      # Usuário admin do container = mesmas credenciais do consumidor
+      # (default guest/guest, igual ao resto do .env.example). O usuário
+      # "guest" nativo do RabbitMQ continua existindo de qualquer forma,
+      # então isso funciona mesmo se RABBITMQ_CONSUMER_USER for alterado.
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_CONSUMER_USER}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_CONSUMER_PASSWORD}
+    ports:
+      - "${RABBITMQ_PORT}:5672"
+      - "${RABBITMQ_MANAGEMENT_PORT}:15672"
+    volumes:
+      - classifier_rabbitmq_data:/var/lib/rabbitmq
+      - ./docker/rabbitmq/definitions.json:/etc/rabbitmq/definitions.json:ro
+      - ./docker/rabbitmq/rabbitmq.conf:/etc/rabbitmq/rabbitmq.conf:ro
+
 volumes:
   classifier_pgdata:
+  classifier_rabbitmq_data:

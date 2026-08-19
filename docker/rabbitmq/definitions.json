@@ -1,0 +1,42 @@
+{
+  "vhosts": [
+    { "name": "/" }
+  ],
+  "queues": [
+    {
+      "name": "scraper.dados.queue",
+      "vhost": "/",
+      "durable": true,
+      "auto_delete": false,
+      "arguments": {}
+    },
+    {
+      "name": "classifier.notificacoes.queue",
+      "vhost": "/",
+      "durable": true,
+      "auto_delete": false,
+      "arguments": {}
+    }
+  ],
+  "exchanges": [
+    {
+      "name": "classifier.saida.exchange",
+      "vhost": "/",
+      "type": "direct",
+      "durable": true,
+      "auto_delete": false,
+      "internal": false,
+      "arguments": {}
+    }
+  ],
+  "bindings": [
+    {
+      "source": "classifier.saida.exchange",
+      "vhost": "/",
+      "destination": "classifier.notificacoes.queue",
+      "destination_type": "queue",
+      "routing_key": "classifier.notificacoes.queue",
+      "arguments": {}
+    }
+  ]
+}
