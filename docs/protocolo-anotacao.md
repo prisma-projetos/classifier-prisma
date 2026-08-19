@@ -79,6 +79,19 @@ Não force uma categoria. Se o parágrafo for genuinamente ambíguo, contraditó
 
 Se o parágrafo, na verdade, não fala nada de relevante sobre a entidade indicada (o sistema identificou o nome por engano, ou é uma menção incidental tipo lista de presença), marque **"não relacionado"** — isso nos ajuda a melhorar a identificação de entidade também, é um sinal útil.
 
+## Intensidade (opcional, experimental)
+
+Além do `label`, se você tiver segurança pra isso, preencha também `intensity`: uma nota de 1 a 5 pra quão forte é o sentimento, não uma categoria nova.
+
+- **1** = levemente negativo · **2** = moderadamente negativo · **3** = fortemente negativo
+- Espelhado pro lado positivo: quanto mais perto de 1, mais leve; quanto mais perto de 5 (dentro da mesma direção do `label`), mais forte/inequívoco.
+
+Isso é **só coleta de dado pra decidir depois** se vale a pena o produto usar uma escala assim no lugar de (ou junto com) as 3 categorias — não é o rótulo que o sistema usa hoje. Regras:
+
+- Só preencha `intensity` quando `label` for `negativo` ou `positivo`. Deixe em branco para `neutro`, `indeterminado` e `não_relacionado` — intensidade de neutro não tem sentido.
+- Se estiver em dúvida sobre a intensidade, deixe em branco em vez de chutar — assim como no `label`, um campo vazio é mais útil pra gente do que um número arbitrário.
+- Não deixe a dúvida sobre intensidade atrasar ou travar sua decisão do `label` — o `label` é o que importa primeiro.
+
 ## Como preencher
 
 Planilha com uma linha por (parágrafo, entidade). Colunas:
@@ -89,6 +102,7 @@ Planilha com uma linha por (parágrafo, entidade). Colunas:
 | `entity_name` | já preenchido — é a entidade que você está avaliando nessa linha |
 | `paragraph_text` | já preenchido — o texto a ler |
 | `label` | `neutro` / `negativo` / `positivo` / `indeterminado` / `nao_relacionado` |
+| `intensity` (opcional) | 1 a 5, só quando `label` for `negativo` ou `positivo` — ver seção "Intensidade" acima |
 | `notes` (opcional) | qualquer dúvida ou justificativa que ache importante registrar |
 
 ## Antes de começar
