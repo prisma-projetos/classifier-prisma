@@ -88,7 +88,7 @@ Além do `label`, se você tiver segurança pra isso, preencha também `intensit
 
 Isso é **só coleta de dado pra decidir depois** se vale a pena o produto usar uma escala assim no lugar de (ou junto com) as 3 categorias — não é o rótulo que o sistema usa hoje. Regras:
 
-- Só preencha `intensity` quando `label` for `negativo` ou `positivo`. Deixe em branco para `neutro`, `indeterminado` e `não_relacionado` — intensidade de neutro não tem sentido.
+- Só preencha `intensity` quando `label` for `negativo` ou `positivo`. Deixe em branco para `neutro`, `indeterminado` e `nao_relacionado` — intensidade de neutro não tem sentido.
 - Se estiver em dúvida sobre a intensidade, deixe em branco em vez de chutar — assim como no `label`, um campo vazio é mais útil pra gente do que um número arbitrário.
 - Não deixe a dúvida sobre intensidade atrasar ou travar sua decisão do `label` — o `label` é o que importa primeiro.
 
