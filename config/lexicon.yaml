@@ -1,0 +1,77 @@
+# LÉXICO ARTESANAL PT-BR -- baseline v1 do Classifier.
+#
+# ATENÇÃO: esta é uma lista curada à mão por quem construiu este repositório,
+# NÃO um léxico cientificamente validado (não é o SentiLex-PT, o OpLexicon
+# nem qualquer outro recurso publicado com validação acadêmica). Serve como
+# ponto de partida simples e barato para ter o pipeline funcionando ponta a
+# ponta e como referência de comparação para uma técnica melhor -- fase 2
+# planejada é um LSTM com embeddings pré-treinados em português (ver
+# classifier-prisma/context.md, seção 9, e README).
+#
+# Cada palavra/expressão é comparada (case-insensitive, por palavra) contra
+# o parágrafo já identificado como mencionando a entidade -- ver
+# src/lexicon.py. Não considera negação, ironia, citação de terceiros nem
+# comparação (ver limitações no README e riscos no context.md raiz, seção
+# 14) -- isso é uma limitação conhecida da baseline, não um bug.
+
+positive:
+  - elogiou
+  - elogia
+  - aprovou
+  - aprova
+  - aprovação
+  - apoiou
+  - apoia
+  - apoio
+  - parabenizou
+  - defendeu
+  - defende
+  - conquistou
+  - conquista
+  - avanço
+  - avançou
+  - sucesso
+  - vitória
+  - venceu
+  - superou
+  - melhorou
+  - melhora
+  - benefício
+  - benefícios
+  - reconhecimento
+  - reconheceu
+  - celebrou
+  - celebra
+
+negative:
+  - criticou
+  - critica
+  - crítica
+  - acusou
+  - acusa
+  - acusação
+  - denunciou
+  - denúncia
+  - reprovou
+  - reprova
+  - reprovação
+  - condenou
+  - condena
+  - rejeitou
+  - rejeita
+  - fracasso
+  - fracassou
+  - falha
+  - falhou
+  - escândalo
+  - corrupção
+  - investigação
+  - investigado
+  - prejudicou
+  - prejuízo
+  - piorou
+  - piora
+  - polêmica
+  - polêmico
+  - repudiou
+  - repúdio

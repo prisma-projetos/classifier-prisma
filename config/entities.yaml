@@ -1,0 +1,100 @@
+# Entidades políticas conhecidas pelo Classifier (políticos e partidos).
+#
+# Cada entrada precisa de:
+#   id              identificador único e estável (slug), usado como chave
+#                    estrangeira em `classifications` -- não reutilizar nem
+#                    mudar depois que já tiver resultado gravado.
+#   canonical_name  nome completo, usado como o principal "apelido" também.
+#   entity_type     'politician' ou 'party'.
+#   aliases         lista de formas como a entidade aparece no texto —
+#                    inclui apelidos, abreviações, variações de grafia.
+#                    Quanto mais completa, melhor o match exato (mais barato
+#                    e mais confiável que depender só do fuzzy).
+#
+# O casamento de entidade usa esta lista para match exato E fuzzy
+# (rapidfuzz, threshold em config/settings.yaml) — ver
+# src/entity_matcher.py e classifier-prisma/context.md, seção 3.1.
+#
+# Lista inicial pequena e ilustrativa (mesmos nomes já usados como exemplo
+# em scrapping-prisma/config/search_terms.yaml), para exercitar o pipeline
+# ponta a ponta. Curadoria completa da lista de entidades acompanhadas é
+# responsabilidade de quem mantém o produto, não deste agente.
+
+entities:
+  - id: lula
+    canonical_name: "Luiz Inácio Lula da Silva"
+    entity_type: politician
+    aliases:
+      - "Lula"
+      - "Lula da Silva"
+      - "presidente Lula"
+      - "Luiz Inácio Lula da Silva"
+
+  - id: jair-bolsonaro
+    canonical_name: "Jair Bolsonaro"
+    entity_type: politician
+    aliases:
+      - "Bolsonaro"
+      - "Jair Bolsonaro"
+      - "ex-presidente Bolsonaro"
+
+  - id: geraldo-alckmin
+    canonical_name: "Geraldo Alckmin"
+    entity_type: politician
+    aliases:
+      - "Alckmin"
+      - "Geraldo Alckmin"
+      - "vice-presidente Alckmin"
+
+  - id: fernando-haddad
+    canonical_name: "Fernando Haddad"
+    entity_type: politician
+    aliases:
+      - "Haddad"
+      - "Fernando Haddad"
+      - "ministro Haddad"
+
+  - id: tarcisio-de-freitas
+    canonical_name: "Tarcísio de Freitas"
+    entity_type: politician
+    aliases:
+      - "Tarcísio"
+      - "Tarcisio"
+      - "Tarcísio de Freitas"
+      - "Tarcisio de Freitas"
+
+  - id: marina-silva
+    canonical_name: "Marina Silva"
+    entity_type: politician
+    aliases:
+      - "Marina Silva"
+      - "ministra Marina"
+
+  - id: pt
+    canonical_name: "Partido dos Trabalhadores"
+    entity_type: party
+    aliases:
+      - "PT"
+      - "Partido dos Trabalhadores"
+      - "PT de Lula"
+
+  - id: pl
+    canonical_name: "Partido Liberal"
+    entity_type: party
+    aliases:
+      - "PL"
+      - "Partido Liberal"
+
+  - id: psol
+    canonical_name: "Partido Socialismo e Liberdade"
+    entity_type: party
+    aliases:
+      - "PSOL"
+      - "Partido Socialismo e Liberdade"
+
+  - id: uniao-brasil
+    canonical_name: "União Brasil"
+    entity_type: party
+    aliases:
+      - "União Brasil"
+      - "Uniao Brasil"

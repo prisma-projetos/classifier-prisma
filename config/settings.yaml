@@ -1,0 +1,15 @@
+entity_matching:
+  # Threshold do fuzzy matching (rapidfuzz, escala 0-1). Match abaixo disso
+  # é descartado -- não gera resultado nem é registrado como "match fraco".
+  # Ver src/entity_matcher.py e classifier-prisma/context.md, seção 3.1.
+  fuzzy_threshold: 0.85
+
+model:
+  # Identificação do modelo/versão gravada em cada classification_run --
+  # ver README sobre esta ser uma baseline léxico/regra (v1), não um modelo
+  # de ML treinado.
+  name: "lexicon-baseline"
+  version: "1"
+
+logging:
+  log_path: "logs/classifier.log"
