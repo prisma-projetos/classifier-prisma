@@ -29,24 +29,16 @@ O `Classifier` também não deve gerar sozinho uma conclusão geral sobre a repu
 
 ## 2. Estado atual
 
-Repositório recém-criado: só há `.git` e um `README.md` vazio. Nenhuma decisão de stack, modelo ou schema foi implementada ainda — tudo abaixo em "decisões em aberto" (seção 9) está genuinamente aberto.
+Implementação em andamento (schema, consumidor RabbitMQ, classificador léxico baseline, testes) — ver histórico de decisões em `docs/adr/` para o que já foi definido. `scrapping-prisma` (repositório irmão) já está funcional e é a referência real de como esse pipeline entrega trabalho para cá.
 
-O `scrapping-prisma` (repositório irmão) já está funcional e é a referência real de como esse pipeline entrega trabalho para cá.
+## 3. Ponto de integração com o Scraper e com o Analyser
 
-## 3. Ponto de integração com o Scraper — DECIDIDO: RabbitMQ, com `analysis_jobs` como outbox interno do scraper
+Decidido: RabbitMQ nas duas fronteiras (Scraper→Classifier e Classifier→Analyser), com padrão outbox transacional dos dois lados — nunca acesso direto a banco de outro serviço. Detalhamento completo, parâmetros de conexão e o porquê de cada escolha:
 
-**Decisão tomada em 16/08 (validada por análise de arquitetura), registrada aqui para não ser reaberta sem motivo.** O projeto vai usar **RabbitMQ** como broker de mensagens entre Scraper e Classifier — infraestrutura sendo configurada externamente a este repositório.
+- [`docs/adr/0001-scraper-classifier-rabbitmq-outbox.md`](docs/adr/0001-scraper-classifier-rabbitmq-outbox.md)
+- [`docs/adr/0002-system-db-compartilhado-outbox-analyser.md`](docs/adr/0002-system-db-compartilhado-outbox-analyser.md)
 
-Isso muda o desenho anterior deste documento, que cogitava o Classifier consumir a fila `analysis_jobs` direto do Postgres do scraper. Essa ideia foi descartada: ela contrariava uma regra que o próprio `context.md` raiz já define (seção 7.2 — "Scraper DB mantém separação lógica"; seção 19.2 — "nenhum componente deve acessar diretamente o banco... de outro"). Vale registrar o porquê, porque não é óbvio:
-
-- a tabela `analysis_jobs` (implementada no `scrapping-prisma`, com trigger + `src/jobs_store.py` + `FOR UPDATE SKIP LOCKED`) já resolve bem o problema de concorrência entre workers — então **RabbitMQ não está entrando para resolver concorrência**, e sim para desacoplar os dois bancos;
-- **`analysis_jobs` não deve ser descartada.** Ela muda de papel: deixa de ser "fila que um worker externo consome" e passa a ser um **outbox transacional interno ao `scrapping-prisma`** — continua gravando via trigger, dentro da mesma transação que marca o artigo como `success` (garantia que não se replica de graça publicando direto no código);
-- o `scrapping-prisma` ganha uma peça nova e pequena — um **publisher** que lê `analysis_jobs` (reaproveitando `claim_next_job`) e publica cada job no RabbitMQ, com o **conteúdo do artigo embutido no payload** (texto, título, `canonical_link`, `source_name`, `published_at`, `article_id`, `job_id`, `pipeline_version`) — não só o ID, para o Classifier nunca precisar voltar ao Postgres do scraper para buscar dado;
-- ao publicar com sucesso, o publisher marca o job com um novo status (nome ainda a decidir — ex. `published`, evitando reusar `completed` com dois significados diferentes); falha de publicação usa o retry (`attempts`/`max_attempts`) que já existe e já é testado.
-
-**Regra que este repositório deve seguir, sem exceção**: o Classifier **nunca tem connection string para o Postgres do scraper**. Ele só fala com o RabbitMQ.
-
-Antes de implementar o consumidor aqui, é preciso alinhar com quem está configurando o RabbitMQ (fora deste repositório) um contrato mínimo: nome da fila/exchange, formato exato do payload (com campo de versão do schema), semântica de ack, política de retry/dead-letter. Sem isso combinado, o risco é o broker ser configurado com uma topologia que não bate com o que o Classifier espera.
+**Regra que este repositório deve seguir, sem exceção**: o Classifier nunca tem connection string para o Postgres do scraper — só fala com ele via RabbitMQ.
 
 ## 4. Contrato de saída esperado
 
@@ -105,20 +97,18 @@ Da seção 16 do contexto geral, os que mais pesam neste repositório:
 - **Reprodutibilidade**: versionar modelo, regras, prompts (se usar LLM) e conjunto de avaliação — um resultado antigo precisa ser explicável com o modelo/versão que o gerou;
 - **Auditabilidade**: todo resultado rastreável até o job de origem e a evidência textual;
 - **Segurança**: se a abordagem envolver API de LLM externa, nunca hardcode a chave — variável de ambiente, nunca commitada; e avaliar se enviar o texto do artigo a um serviço terceiro é aceitável (o conteúdo sai do ambiente controlado — ver LGPD, seção 16 do contexto geral);
-- **Eficiência de custo**: se a técnica escolhida for uma API paga por token, o custo por classificação importa dado que a monetização por anúncio (seção 20.1) gera receita modesta por usuário.
+- **Eficiência de custo**: se a técnica escolhida for uma API paga por token, o custo por classificação importa dado que a monetização por anúncio (seção 20 do contexto geral, detalhada em `docs/publicacao-e-monetizacao.md` na raiz) gera receita modesta por usuário.
 
 ## 9. Decisões em aberto específicas deste repositório
 
-Nenhuma destas está decidida — não assumir nenhuma sem validar:
+Decisões já resolvidas: ver `docs/adr/`. Genuinamente em aberto:
 
-- técnica de classificação (regras/léxico, ML tradicional, LSTM, transformer ajustado, LLM, híbrido);
-- linguagem/stack de implementação (Python é o caminho natural por reaproveitar padrões e eventualmente bibliotecas do `scrapping-prisma`, mas isso é uma sugestão, não decisão tomada);
-- estratégia de identificação e resolução de entidades (lista fixa de políticos/partidos mantida manualmente? NER genérico? fuzzy matching de nome?);
-- unidade de segmentação do texto (sentença, parágrafo, janela deslizante) — seção 18 do contexto geral;
-- mecanismo de publicação do evento para o Analyser (a fronteira Scraper→Classifier já está decidida como RabbitMQ — seção 3 — mas Classifier→Analyser segue em aberto);
-- modelo local vs. API de terceiro, e as implicações de custo/latência/privacidade que isso traz (seção 8).
+- **Técnica de classificação final (fase 2, pós-baseline)** — candidata: LSTM com embeddings pré-treinados em português (NILC/USP). A baseline léxico/regra (v1) vem primeiro e serve de referência de comparação (seção 6).
+- **Correferência de entidade** (menção sem nome explícito, ex. "candidato", "presidente") — bloqueia a extração do dataset de rotulagem. Pesquisa e alternativas em [`docs/pesquisa-correferencia.md`](docs/pesquisa-correferencia.md).
+- Dono das migrations do System DB quando o `Analyser` existir (ver ADR 0002).
+- Confirmar com o DevOps o nome da fila/exchange da notificação Classifier→Analyser antes de produção (ver ADR 0002).
 
-Ao propor resolver qualquer um desses pontos, apresentar justificativa, alternativas, riscos e impacto — conforme seção 19.1 (item 10) e seção 18 do contexto geral.
+Ao propor resolver qualquer um dos pontos ainda abertos, apresentar justificativa, alternativas, riscos e impacto — conforme seção 19.1 (item 10) e seção 18 do contexto geral. Decisão resolvida vira um ADR novo em `docs/adr/`, não um parágrafo aqui.
 
 ## 10. Orientações para quem implementar este repositório
 
