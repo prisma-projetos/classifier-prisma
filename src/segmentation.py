@@ -9,8 +9,12 @@ import re
 # unidade de segmentação diferente) se torna só mais uma entrada neste
 # dict, com sua própria função -- sem precisar herdar de nada.
 
-_BLANK_LINE_RE = re.compile(r"\n\s*\n+")
-_WHITESPACE_RE = re.compile(r"\s+")
+
+# `trafilatura` (extrator usado pelo scrapping-prisma) separa parágrafos com
+# UMA quebra de linha só, não linha em branco -- `\n+` cobre os dois casos
+# (funciona tanto pra "\n" simples quanto pra "\n\n" de linha em branco).
+_PARAGRAPH_SPLIT_RE = re.compile(r"\n+")
+_WHITESPACE_RE = re.compile(r"[ \t]+")
 
 # Parágrafos mais curtos que isso são descartados -- normalmente lixo de
 # formatação (linha em branco perdida, um "•" solto, etc.), não uma unidade
@@ -34,11 +38,12 @@ class UnsupportedContentTypeError(Exception):
 
 
 def _segment_news_article(full_text: str) -> list[str]:
-    """Segmenta por parágrafo: blocos separados por uma ou mais linhas em
-    branco. Espaços internos são colapsados (mas o texto do parágrafo em si
-    não é reescrito além disso -- a evidência persistida deve continuar
+    """Segmenta por parágrafo: blocos separados por uma ou mais quebras de
+    linha (linha em branco OU quebra simples -- ver _PARAGRAPH_SPLIT_RE).
+    Espaços/tabs internos são colapsados (mas o texto do parágrafo em si não
+    é reescrito além disso -- a evidência persistida deve continuar
     reconhecível como o trecho original)."""
-    raw_paragraphs = _BLANK_LINE_RE.split(full_text)
+    raw_paragraphs = _PARAGRAPH_SPLIT_RE.split(full_text)
     paragraphs = []
     for raw in raw_paragraphs:
         collapsed = _WHITESPACE_RE.sub(" ", raw).strip()
