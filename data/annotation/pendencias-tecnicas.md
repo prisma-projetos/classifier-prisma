@@ -1,8 +1,8 @@
 # Pendências técnicas encontradas durante a anotação manual
 
-## Regras de anotação a incorporar em docs/protocolo-anotacao.md (depois, não agora)
+## Regras de anotação incorporadas em docs/protocolo-anotacao.md (RESOLVIDO — 2026-08-20)
 
-Esclarecimentos que surgiram lendo linha por linha com a Bea, complementares aos exemplos que já estão no protocolo:
+Esclarecimentos que surgiram lendo linha por linha com a Bea, complementares aos exemplos que já estavam no protocolo. Incorporados como itens 3, 4, 5 (subitem partido), 8, 9 e 10 da seção "Casos difíceis" do protocolo — urgente porque os outros 5 revisores já estavam anotando sem essas regras.
 
 1. **Autocitação/relato da própria pessoa não é elogio nem crítica de terceiro.** Se a própria entidade cita fatos favoráveis sobre si mesma (ex.: "reabertura de fábricas" citada pelo próprio Alckmin, que geriu a política), ou descreve sua própria ação/fala, é `neutro` -- só conta quando ALGUÉM DE FORA avalia explicitamente.
 2. **Só `positivo`/`negativo` quando há julgamento explícito no texto** -- uma palavra/frase de avaliação (elogio, crítica, "fracasso", "sucesso", "medíocre"), não um fato que o leitor PODE interpretar como bom ou ruim. Regra geral confirmada várias vezes pela Bea.
@@ -24,9 +24,9 @@ Ajuste sugerido (não aplicado ainda): remover "Bolsonaro" sozinho dos aliases d
 
 `config/entities.yaml` tem 10 entidades (lula, jair-bolsonaro, geraldo-alckmin, fernando-haddad, tarcisio-de-freitas, marina-silva, pt, pl, psol, uniao-brasil) -- **PSB não está entre elas**, mesmo sendo o partido do próprio vice-presidente Geraldo Alckmin e aparecendo com frequência nos artigos (ex.: `250-1`: "O PSB oficializou... a candidatura do vice-presidente Geraldo Alckmin"). Curadoria a fazer: adicionar PSB (e revisar se falta algum outro partido relevante) em `config/entities.yaml`.
 
-## 3. Atribuição: sigla de partido entre parênteses ≠ avaliação do partido
+## 3. RESOLVIDO: atribuição — sigla de partido entre parênteses ≠ avaliação do partido
 
-Achado lendo `24-2` [Partido Liberal]: "Renan Santos... focando nas críticas... ao senador Flávio Bolsonaro (PL)". O match técnico está correto (o texto cita "PL"), mas a crítica é dirigida ao Flávio como pessoa -- o "(PL)" é só a filiação partidária entre parênteses, não uma avaliação do partido em si. Não é bug de matching (o entity_matcher fez o trabalho dele, achar a menção); é uma orientação de anotação: quando a sigla do partido aparece só como identificação do político citado, e a crítica/elogio é claramente à pessoa, classificar `neutro` para a entidade-partido (mesmo padrão de "crítica à medida vs. crítica à pessoa" do protocolo, estendido pra "crítica à pessoa vs. ao partido dela"). Vale um exemplo assim no `docs/protocolo-anotacao.md` quando for atualizado.
+Achado lendo `24-2` [Partido Liberal]: "Renan Santos... focando nas críticas... ao senador Flávio Bolsonaro (PL)". O match técnico está correto (o texto cita "PL"), mas a crítica é dirigida ao Flávio como pessoa -- o "(PL)" é só a filiação partidária entre parênteses, não uma avaliação do partido em si. Não é bug de matching (o entity_matcher fez o trabalho dele, achar a menção); é uma orientação de anotação: quando a sigla do partido aparece só como identificação do político citado, e a crítica/elogio é claramente à pessoa, classificar `neutro` para a entidade-partido (mesmo padrão de "crítica à medida vs. crítica à pessoa" do protocolo, estendido pra "crítica à pessoa vs. ao partido dela"). Incorporado como item 5 (subitem partido) de `docs/protocolo-anotacao.md`.
 
 ## 4. RESOLVIDO (não é bug): "só reconhece 1 entidade" era o round-robin, não o matcher
 

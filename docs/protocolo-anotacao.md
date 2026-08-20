@@ -19,7 +19,7 @@ Sua tarefa: decidir se **aquele parágrafo, especificamente em relação àquele
 
 - **Não é viés político.** Não estamos avaliando se o político é de esquerda, direita, centro, nem se a notícia "parece" tendenciosa ideologicamente. Ignore sua opinião pessoal sobre o político — a tarefa é só: o texto fala bem, mal, ou de forma neutra sobre ele?
 - **Não é se a acusação é verdadeira.** Se o parágrafo diz "o prefeito foi acusado de corrupção", isso é **negativo** independente de a acusação ser verdadeira ou não. Você está classificando o que o texto diz, não julgando os fatos.
-- **Não é sobre o assunto/política em si.** Se o parágrafo fala mal de uma lei sem ligar isso ao político especificamente, pode não ser negativo para a pessoa (ver regra 3 abaixo).
+- **Não é sobre o assunto/política em si.** Se o parágrafo fala mal de uma lei sem ligar isso ao político especificamente, pode não ser negativo para a pessoa (ver regra 5 abaixo).
 
 ## As 3 categorias, com exemplo
 
@@ -53,21 +53,60 @@ Elogia, aprova, ou associa a pessoa/partido a algo favorável.
 > "Genial, mais um escândalo do governo."
 Isso é sarcasmo — classifique como **negativo**, mesmo que "genial" pareça uma palavra positiva.
 
-### 3. Crítica à medida/decisão vs. crítica à pessoa
+### 3. Julgamento precisa ser explícito — não vale o que você, leitor, acha que é bom ou ruim
+Só classifique **positivo**/**negativo** quando houver uma palavra ou frase de avaliação real no texto: elogio, crítica, "fracasso", "sucesso", "escândalo", "medíocre", "não conseguiu provar isso quando governou". Um fato que você, como leitor, interpreta como bom ou ruim por conta própria não conta — isso é viés seu, não o texto falando.
+
+> "A política econômica do governo foi um fracasso." → negativo ("fracasso" é o julgamento explícito, está escrito)
+
+> "O governo reabriu 40 fábricas durante a gestão." → neutro. Você pode achar isso positivo, mas o parágrafo só descreve um fato — ninguém ali está avaliando isso como bom. Pode existir gente que não ache isso positivo. Não infira a avaliação: exija que ela esteja no texto.
+
+Essa é a regra-base por trás de vários casos difíceis abaixo — releia esta seção sempre que ficar em dúvida se algo é "só um fato" ou "um julgamento".
+
+### 4. Autocitação não é elogio de terceiro
+Se a própria entidade fala bem de si mesma — lista conquistas, cita obras da própria gestão, descreve a própria ação/fala — sem que ninguém de fora avalie isso, é **neutro**. Só vira positivo/negativo quando alguém DE FORA avalia explicitamente (ver regra 3 acima).
+
+> "O vice-governador citou as fábricas reabertas durante sua gestão." → neutro. Ele está falando de coisas boas que fez, mas quem fala é ele mesmo — não há ninguém de fora elogiando.
+
+> "Os moradores elogiaram o vice-governador pelas fábricas reabertas durante sua gestão." → positivo. Agora quem avalia é um terceiro ("os moradores"), não a própria entidade.
+
+### 5. Crítica à medida/decisão vs. crítica à pessoa vs. crítica ao partido dela
 - Se o político é claramente o autor/responsável pela medida criticada → **negativo** para ele.
   > "O projeto de lei do senador foi amplamente criticado por juristas." → negativo (o projeto é dele, a crítica recai sobre ele)
 - Se o político só é citado de passagem perto de uma discussão sobre política pública, sem ligação direta de autoria → normalmente **neutro**.
   > "O senador participou da audiência sobre a nova lei de trânsito, que divide opiniões." → neutro (ele não é o autor, só participou)
+- Se a entidade da linha é um **partido** citado só como sigla entre parênteses ao lado do nome de uma pessoa, e a crítica/elogio do parágrafo é claramente dirigida à pessoa — não ao partido como instituição — classifique **neutro** para a linha do partido, mesmo que a sigla apareça tecnicamente no texto.
+  > "Renan Santos criticou duramente o senador Flávio Bolsonaro (PL) durante o evento." → negativo para Flávio Bolsonaro; **neutro para o PL** — o "(PL)" ali é só a filiação partidária entre parênteses, quem está sendo criticado é a pessoa.
 
-### 4. Vítima de um evento negativo ≠ avaliação negativa da pessoa
+### 6. Vítima de um evento negativo ≠ avaliação negativa da pessoa
 > "O prefeito foi alvo de um atentado na última semana."
 Isso é sobre algo ruim que **aconteceu com** ele, não uma crítica **a** ele. Classifique como **neutro** (a menos que o parágrafo também inclua uma avaliação, positiva ou negativa, sobre ele).
 
-### 5. Fala de terceiros também conta
+### 7. Fala de terceiros também conta
 Se o parágrafo cita a opinião de outra pessoa sobre o político, classifique pelo que está sendo dito sobre a entidade no parágrafo — não importa se é a opinião do jornalista ou de alguém citado.
 > "Para o economista Fulano, a política econômica do governador foi um fracasso." → negativo (o parágrafo carrega uma crítica ao governador, ainda que atribuída a outra pessoa)
 
-### 6. Duas entidades no mesmo parágrafo
+### 8. Reação de plateia/público também é avaliação de terceiro
+Aplausos, vaias, ser "contestado aos gritos", uma torcida cantando o nome de alguém — tudo isso conta como avaliação de terceiro, mesmo sem uma frase explícita do tipo "Fulano foi elogiado/criticado por X".
+
+> "O prefeito foi aplaudido de pé ao anunciar a medida." → positivo (o aplauso é a avaliação de terceiro, mesmo sem ninguém "dizer" que ele foi bem)
+
+> "O deputado foi vaiado e contestado aos gritos pela plateia durante o discurso." → negativo
+
+### 9. Comparação metafórica explícita com figura amplamente positiva conta como elogio
+Se o parágrafo compara a entidade a uma figura reconhecidamente positiva, isso é elogio de terceiro — mesmo vindo com ressalva ou humildade no meio ("é difícil comparar, mas...").
+
+> "É difícil comparar qualquer um ao Pelé, mas o pai jogava desse jeito" — dito por um filho sobre o pai político. → positivo para o pai. A ressalva não anula a comparação, ela é só humildade de quem fala; a comparação com uma figura amplamente celebrada é o elogio.
+
+### 10. Resultado de apuração/investigação sem julgamento explícito é neutro
+Relatar o resultado factual de uma apuração, investigação ou perícia — mesmo que ele contradiga uma versão anterior dos fatos — é **neutro**, a menos que alguém critique ou elogie expressamente esse resultado (regra 3). Contradizer uma versão não é o mesmo que avaliar negativamente.
+
+> "A apuração não identificou indícios de procedimento irregular por parte do policial." → neutro (resultado factual, sem julgamento)
+
+> "A perícia encontrou divergências entre o relato da vítima e as imagens do circuito interno." → neutro, mesmo contradizendo o relato anterior — ninguém no parágrafo está avaliando isso como bom ou ruim para a entidade.
+
+> "Especialistas criticaram a demora da apuração em concluir o caso." → negativo — aqui há julgamento explícito ("criticaram").
+
+### 11. Duas entidades no mesmo parágrafo
 Você pode receber o mesmo parágrafo duas vezes, uma para cada político citado nele. Classifique cada linha considerando **só a entidade indicada naquela linha**, mesmo que o parágrafo fale de outra pessoa também.
 > "Enquanto o deputado João defendeu o projeto, a senadora Ana o classificou como um retrocesso."
 > - Linha para João → positivo
