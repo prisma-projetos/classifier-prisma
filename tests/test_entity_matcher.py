@@ -8,6 +8,25 @@ PT = Entity(id="pt", canonical_name="Partido dos Trabalhadores", entity_type="pa
 
 ENTITIES = [LULA, PT]
 
+LULA_COM_ALIAS_PRESIDENTE = Entity(
+    id="lula",
+    canonical_name="Luiz Inácio Lula da Silva",
+    entity_type="politician",
+    aliases=("Lula", "presidente Lula"),
+)
+LULA_APENAS_ALIAS_PRESIDENTE = Entity(
+    id="lula",
+    canonical_name="Luiz Inácio Lula da Silva",
+    entity_type="politician",
+    aliases=("presidente Lula",),
+)
+UNIAO_BRASIL = Entity(
+    id="uniao-brasil",
+    canonical_name="União Brasil",
+    entity_type="party",
+    aliases=("União Brasil", "Uniao Brasil"),
+)
+
 
 def test_exact_match_by_alias():
     matches = match_entities("O presidente Lula anunciou uma nova medida econômica.", ENTITIES, fuzzy_threshold=0.85)
@@ -65,3 +84,47 @@ def test_entity_matched_at_most_once_per_paragraph():
 
     assert len(matches) == 1
     assert matches[0].entity_id == "lula"
+
+
+def test_fuzzy_multiword_alias_does_not_match_unrelated_word_after_shared_prefix():
+    # "presidente da Petrobras" não deveria casar com o alias "presidente
+    # Lula" só porque a primeira palavra é idêntica -- comparar a janela
+    # inteira concatenada deixava "presidente" (palavra longa) dominar o
+    # score de caracteres e mascarar que "da" não tem nada a ver com "Lula".
+    matches = match_entities(
+        "A presidente da Petrobras, Magda Chambriard, afirmou que a empresa vai investir mais.",
+        [LULA_COM_ALIAS_PRESIDENTE],
+        fuzzy_threshold=0.85,
+    )
+
+    assert matches == []
+
+
+def test_fuzzy_multiword_alias_still_matches_real_typo():
+    # "presidente Lulla" (erro de digitação plausível) ainda deve casar com
+    # o alias "presidente Lula" -- o fix não pode virar rejeição geral de
+    # aliases com múltiplas palavras. Entidade só com esse alias (sem
+    # "Lula" isolado) pra isolar o comportamento do alias multi-palavra.
+    matches = match_entities(
+        "O presidente Lulla anunciou uma nova medida econômica.",
+        [LULA_APENAS_ALIAS_PRESIDENTE],
+        fuzzy_threshold=0.85,
+    )
+
+    assert len(matches) == 1
+    assert matches[0].entity_id == "lula"
+    assert matches[0].match_type == "fuzzy"
+    assert matches[0].matched_alias == "presidente Lula"
+
+
+def test_fuzzy_multiword_alias_does_not_match_generic_country_mention():
+    # "no Brasil" não deveria casar com o alias "União Brasil" -- mesmo
+    # problema de palavra-âncora ("Brasil") dominando o score da janela
+    # inteira.
+    matches = match_entities(
+        "O evento aconteceu no Brasil e reuniu especialistas de vários países.",
+        [UNIAO_BRASIL],
+        fuzzy_threshold=0.85,
+    )
+
+    assert matches == []

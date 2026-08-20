@@ -28,21 +28,34 @@ def _fuzzy_match_score(alias: str, paragraph: str) -> float:
     """Compara o alias contra janelas de palavras do parágrafo (não a string
     inteira) -- `fuzz.partial_ratio` sobre o parágrafo inteiro casaria "Lula"
     como substring de "Lulalândia" com score 1.0, já que ele ignora fronteira
-    de palavra. Aqui cada janela tem o mesmo número de palavras que o alias,
-    então erro de digitação em "Lulla" ainda pontua alto contra o token
-    "Lulla", mas "Lulalândia" (uma palavra só) não vira substring escondida
-    de "Lula"."""
+    de palavra. Aqui cada janela tem o mesmo número de palavras que o alias.
+
+    Dentro de cada janela, o score é o MÍNIMO do `fuzz.ratio` palavra-a-palavra
+    (mesma posição no alias e na janela), não o `fuzz.ratio` da janela inteira
+    concatenada. Comparar a janela inteira deixa uma palavra-âncora longa do
+    alias dominar o score de caracteres -- por exemplo, `fuzz.ratio("presidente
+    lula", "presidente da")` dá 0.857, porque "presidente" (10 chars) pesa
+    muito mais que "lula"/"da" (4 chars), então "presidente da Câmara" casaria
+    falsamente com o alias "presidente Lula" mesmo sem citar Lula. Comparando
+    palavra por palavra e usando o mínimo, essa mesma frase cai pro ratio
+    baixo de "lula" vs "da" e é rejeitada, enquanto um erro de digitação real
+    (ex.: "presidente Lulla") mantém as duas palavras com ratio alto e
+    continua sendo aceito. Para alias de uma palavra só, isso reduz ao mesmo
+    comportamento de antes."""
     alias_words = alias.split()
     window_size = len(alias_words)
     paragraph_words = _WORD_RE.findall(paragraph)
     if window_size == 0 or len(paragraph_words) < window_size:
         return 0.0
 
-    alias_lower = alias.lower()
+    alias_words_lower = [w.lower() for w in alias_words]
     best_score = 0.0
     for i in range(len(paragraph_words) - window_size + 1):
-        window = " ".join(paragraph_words[i : i + window_size]).lower()
-        score = fuzz.ratio(alias_lower, window) / 100.0
+        window_words = paragraph_words[i : i + window_size]
+        score = min(
+            fuzz.ratio(alias_word, window_word.lower())
+            for alias_word, window_word in zip(alias_words_lower, window_words)
+        ) / 100.0
         if score > best_score:
             best_score = score
 
