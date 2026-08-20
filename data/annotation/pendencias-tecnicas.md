@@ -32,16 +32,24 @@ Achado lendo `24-2` [Partido Liberal]: "Renan Santos... focando nas críticas...
 
 A Bea notou o padrão "texto menciona 3 entidades, só 1 vira linha" enquanto respondia a planilha. Investigados dois casos (`24-1` e `261-1`): em ambos o `entity_matcher` encontrou TODAS as entidades do parágrafo corretamente (`261-1`, por exemplo, gerou 6: Lula, Jair Bolsonaro, Alckmin, PT, PL, PSOL). O que a Bea via como "sumiço" era o **round-robin do `scripts/build_annotation_batches.py`**: cada revisor recebe só uma fatia das entidades de um mesmo parágrafo (exceto as de sobreposição, que vão pra todo mundo) -- ver `data/annotation/manifest.csv`, coluna `reviewers`, pra conferir quem ficou com qual entidade de um parágrafo. Não precisa de ajuste; é o comportamento pretendido pra dividir o volume entre os 6.
 
-## 5. BUG confirmado: fuzzy match falso positivo de "União Brasil" em "no Brasil"
+## 5. RESOLVIDO: fuzzy match falso positivo de "União Brasil" em "no Brasil"
 
-Prioridade alta -- pode estar afetando muitas linhas no corpus inteiro, não só uma. Confirmado: `_fuzzy_match_score` (`src/entity_matcher.py`) casa o alias "União Brasil" contra a janela de 2 palavras "no Brasil" com score 85.7% (`fuzz.ratio`), acima do `fuzzy_threshold` de 0.85 (`config/settings.yaml`). Como "no Brasil"/"do Brasil"/"o Brasil" são frases extremamente comuns em qualquer notícia política brasileira, isso provavelmente está gerando muitas linhas espúrias de "União Brasil" (`nao_relacionado` na prática) espalhadas pelo dataset inteiro. Caso concreto: parágrafo `289-4` (fala sobre "estrela", "poder", "Brasil" -- nunca menciona União Brasil).
+Corrigido em `fix: corrige fuzzy match de string inteira em aliases multi-palavra` (2026-08-20). Causa raiz: `_fuzzy_match_score` comparava a janela inteira concatenada contra o alias inteiro via `fuzz.ratio` -- uma palavra-âncora longa do alias ("União") dominava o score de caracteres, deixando "Brasil" (a palavra curta) quase irrelevante. "no Brasil" batia 85.7% contra "União Brasil", acima do `fuzzy_threshold` de 0.85. Corrigido comparando palavra por palavra (mesma posição no alias e na janela) e usando o mínimo dos scores -- um conector genérico no lugar da palavra de verdade agora derruba o score. Testes de regressão em `tests/test_entity_matcher.py`.
 
-Ajuste sugerido (não aplicado ainda): subir o `fuzzy_threshold` especificamente pra aliases curtos/genéricos tipo "Brasil" dentro de "União Brasil", ou exigir que pelo menos uma palavra "forte" do alias (ex.: "União") também apareça na janela candidata antes de aceitar o fuzzy match -- decisão de desenho, discutir antes de implementar.
+## 6. RESOLVIDO: mesmo bug também afetava "presidente Lula" em "presidente da"
 
-## 6. Suspeita de segundo falso positivo: "presidente" sozinho casando com Lula
-
-Parágrafo `4-7`: "A presidente da Petrobras, Magda Chambriard, afirmou..." -- nunca menciona Lula, mas gerou uma linha para a entidade `lula`. Ainda não investigado a fundo (diferente do item 5, que foi confirmado com teste direto) -- hipótese: fuzzy match de "presidente Lula" contra uma janela que inclui "presidente" sozinho + palavra seguinte, ou algum alias curto demais. Vale rodar o mesmo tipo de teste do item 5 antes de decidir o ajuste.
+Mesma causa raiz do item 5, mesmo fix. Confirmado com o parágrafo `4-7` ("A presidente da Petrobras, Magda Chambriard, afirmou...") -- gerava uma linha falsa para `lula` (fuzzy, score 0.857, alias "presidente Lula") sem nunca mencionar Lula. Esse era o caso mais grave dos dois: "presidente da/na [qualquer coisa]" é uma construção comum demais em notícia política pra ser um falso positivo raro. Resolvido pelo mesmo fix do item 5, com teste de regressão dedicado.
 
 ## 7. Suspeita (não confirmada) de entidade não reconhecida em algum parágrafo
 
 Item genuinamente em aberto (diferente do item 4, que foi fechado): se aparecer um caso onde uma entidade mencionada no texto comprovadamente não gera NENHUMA linha em lugar nenhum (nem no manifest completo, não só no arquivo de um revisor específico), registrar aqui com o `paragraph_id` exato.
+
+## 8. Desempate de aliases da mesma entidade depende da ordem do YAML (baixa prioridade)
+
+Investigado (2026-08-20), não corrigido de propósito -- é dívida pequena, não bug urgente. Em `match_entities`, quando dois aliases da MESMA entidade empatam no score fuzzy, o código mantém o primeiro candidato encontrado (`fuzzy_score > best.score` é estritamente maior, não `>=`) -- ou seja, quem "ganha" depende só da ordem em que os aliases aparecem em `config/entities.yaml`, não de uma regra de especificidade.
+
+Confirmado que acontece de verdade: 49 ocorrências no CSV real, causadas por mojibake (`TarcÃsio` vs `Tarcísio`) fazendo `Tarcisio`/`Tarcísio`/`Tarcísio de Freitas`/`Tarcisio de Freitas` empatarem no mesmo parágrafo -- nesses casos o alias mais específico venceu por coincidência de ordem no YAML. Em cenário sintético ("presidente Lulla"), o MENOS específico ("Lula") venceu, porque "presidente Lula" vem depois na lista de aliases.
+
+Impacto: nenhum na classificação em si (`entity_id`, `category`, `confidence`, `paragraph_index` não mudam) -- só o campo de auditoria `entity_matched_alias` (`classifications`, ver comentário na migration 0003) registra o alias "errado". Quem audita ainda vê a entidade certa, o trecho completo (`evidence_text`) e o score, então dá pra confirmar manualmente mesmo assim -- é qualidade de auditoria, não integridade de dado.
+
+Ajuste sugerido quando for feito: ao empatar, preferir o alias mais longo/específico em vez de manter o primeiro -- não depender da ordem do YAML, que é frágil (o próximo alias adicionado pode inverter o resultado "por sorte").
