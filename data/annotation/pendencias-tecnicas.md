@@ -2,9 +2,19 @@
 
 Consolidado em 2026-08-25 -- reorganizado pra separar o que já foi resolvido (registro histórico, resumido) do que ainda está em aberto (o backlog de verdade). Itens renumerados nessa reorganização; se algo antigo referenciar "item N", o número pode ter mudado.
 
+## Trabalho em andamento (2026-08-25) -- se a sessão cair, retomar por aqui
+
+Rodando em paralelo agora:
+- **Item 3** (case-sensitivity nos aliases de partido) -- agente `backend-engineer` disparado, implementando em `src/entity_matcher.py` + testes em `tests/test_entity_matcher.py`. Se der erro/travar no meio, conferir se esses arquivos já têm alguma mudança parcial antes de disparar de novo.
+- **Item 4** (benchmark de performance) -- agente `backend-engineer` disparado, criando `scripts/benchmark_entity_matcher.py` com dado sintético (~1.400 entidades) + parágrafos reais de `data/raw/articles_202608191040.csv`. Vai reportar números reais de tempo/parágrafo, ainda não sei o resultado.
+- **Item 2**: script pronto em `scripts/sql/002_tabela_classificacao_idempotencia_auditoria.sql` -- **falta a Bea rodar contra o banco de verdade** (dados fictícios, script já usa `TRUNCATE` antes, sem backfill).
+- **Item 1**: **bloqueado** -- preciso de credenciais do `app_db2` no `.env` (`APP_DB2_HOST`/`PORT`/`DB`/`USER`/`PASSWORD` ou similar) pra escrever E testar a migração de verdade, não só escrever código no escuro. Pedido feito à Bea, aguardando.
+
 ## Em aberto
 
 ### 1. Migrar `entity_matcher`/`main.py` de `config/entities.yaml` pra `entidade_matching` (app_db2)
+
+**BLOQUEADO**: preciso de credenciais de acesso ao `app_db2` (ver "Trabalho em andamento" acima).
 
 Decisão já tomada (2026-08-24): o YAML manual vai ser extinto, fonte de entidades passa a ser só a tabela `entidade_matching`. Falta implementar:
 
