@@ -53,3 +53,24 @@ Confirmado que acontece de verdade: 49 ocorrências no CSV real, causadas por mo
 Impacto: nenhum na classificação em si (`entity_id`, `category`, `confidence`, `paragraph_index` não mudam) -- só o campo de auditoria `entity_matched_alias` (`classifications`, ver comentário na migration 0003) registra o alias "errado". Quem audita ainda vê a entidade certa, o trecho completo (`evidence_text`) e o score, então dá pra confirmar manualmente mesmo assim -- é qualidade de auditoria, não integridade de dado.
 
 Ajuste sugerido quando for feito: ao empatar, preferir o alias mais longo/específico em vez de manter o primeiro -- não depender da ordem do YAML, que é frágil (o próximo alias adicionado pode inverter o resultado "por sorte").
+
+## 9. Partidos sem forma segura de alias -- sigla é igual ao nome completo
+
+Achado populando `entidade_matching` a partir do TSE (2026-08-24). Pra a maioria dos partidos com sigla igual a palavra comum do português (ex.: "NOVO", "UNIÃO", "REDE"), a correção foi usar o nome completo em vez da sigla sozinha (ex.: `["NOVO"]` -> `["PARTIDO NOVO"]`). Mas **7 partidos não têm essa saída, porque a sigla JÁ É o nome completo** -- não existe forma mais longa/seguro pra cair:
+
+- AGIR
+- AVANTE
+- CIDADANIA
+- DEMOCRATA
+- PODEMOS (menos grave que "PODE" sozinho, mas "podemos" ainda é verbo comum)
+- REPUBLICANOS (**maior risco real** -- "os republicanos" é como o português se refere a apoiadores do Partido Republicano americano; nosso próprio corpus já tem notícia sobre tarifa/Trump/EUA onde isso apareceria. Também é o partido do Tarcísio, então não é partido de baixa relevância -- 53 candidatos no escopo B)
+- SOLIDARIEDADE
+
+Caso relacionado, risco menor (é sigla curta de 2 letras, não palavra do dicionário): PROGRESSISTAS (sigla "PP").
+
+**Opções levantadas, nenhuma aplicada ainda:**
+1. Aceitar o risco (deixa como está)
+2. Desativar o match automático desses partidos por enquanto (`ativo = false` em `entidade_matching`) -- perde cobertura desses 7-8 partidos, mas não suja o resto do dado com falso positivo. Opção mais segura pro tipo de produto (público, erro de classificação tem custo de credibilidade -- `context.md` raiz).
+3. Resolver com código no `entity_matcher`: exigir contexto adicional pra aceitar esses aliases sozinhos (ex.: só casar se aparecer entre parênteses logo depois de um nome de pessoa, padrão real de como o texto cita partido: "Fulano (REPUBLICANOS)"). É a única forma de manter cobertura sem o ruído, mas é mudança de código de verdade, não SQL -- não é pra agora.
+
+Decisão de qual caminho seguir ainda em aberto.
