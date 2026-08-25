@@ -34,7 +34,6 @@ entities:
     canonical_name: "Jair Bolsonaro"
     entity_type: politician
     aliases:
-      - "Bolsonaro"
       - "Jair Bolsonaro"
       - "ex-presidente Bolsonaro"
 
@@ -58,8 +57,6 @@ entities:
     canonical_name: "Tarcísio de Freitas"
     entity_type: politician
     aliases:
-      - "Tarcísio"
-      - "Tarcisio"
       - "Tarcísio de Freitas"
       - "Tarcisio de Freitas"
 
@@ -76,7 +73,6 @@ entities:
     aliases:
       - "PT"
       - "Partido dos Trabalhadores"
-      - "PT de Lula"
 
   - id: pl
     canonical_name: "Partido Liberal"
