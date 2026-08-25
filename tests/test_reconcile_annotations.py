@@ -14,6 +14,12 @@ if str(SCRIPTS_DIR) not in sys.path:
 
 import reconcile_annotations as ra  # noqa: E402
 
+# Nomes de revisor usados só pra montar cenários de teste -- não é mais um
+# REVIEWERS hardcoded no módulo (ele descobre os arquivos dinamicamente via
+# glob), mas os testes de resolve_final_label/fleiss_kappa não dependem de
+# arquivo em disco, só de uma lista consistente de identificadores.
+REVIEWER_NAMES = [f"revisor_{i}" for i in range(1, 7)]
+
 
 def test_normalize_label_accepts_canonical_values():
     assert ra.normalize_label("negativo") == "negativo"
@@ -38,15 +44,15 @@ def test_resolve_final_label_without_responses_is_pending():
 
 
 def test_resolve_final_label_unanimous_is_resolved_automatically():
-    unit = ra.Unit("u1", "1", "1-0", "lula", "Lula", "train", True, "texto", ra.REVIEWERS)
-    unit.responses = [ra.Response(r, "positivo", 4, "") for r in ra.REVIEWERS]
+    unit = ra.Unit("u1", "1", "1-0", "lula", "Lula", "train", True, "texto", REVIEWER_NAMES)
+    unit.responses = [ra.Response(r, "positivo", 4, "") for r in REVIEWER_NAMES]
     label, needs_review = ra.resolve_final_label(unit)
     assert label == "positivo"
     assert needs_review is False
 
 
 def test_resolve_final_label_disagreement_is_never_decided_by_majority():
-    unit = ra.Unit("u1", "1", "1-0", "lula", "Lula", "train", True, "texto", ra.REVIEWERS)
+    unit = ra.Unit("u1", "1", "1-0", "lula", "Lula", "train", True, "texto", REVIEWER_NAMES)
     unit.responses = [
         ra.Response("revisor_1", "positivo", None, ""),
         ra.Response("revisor_2", "positivo", None, ""),
@@ -83,6 +89,23 @@ def test_fleiss_kappa_ignores_units_with_a_single_response():
     assert ra.fleiss_kappa(rows) is None
 
 
+def test_discover_reviewer_files_uses_real_names_and_ignores_original_divisions(tmp_path, monkeypatch):
+    monkeypatch.setattr(ra, "DATA_DIR", tmp_path)
+
+    (tmp_path / "revisor_bea.csv").write_text("paragraph_id,entity_name,label\n", encoding="utf-8")
+    (tmp_path / "revisor_anderson.csv").write_text("paragraph_id,entity_name,label\n", encoding="utf-8")
+    (tmp_path / "manifest.csv").write_text("unit_id\n", encoding="utf-8")  # não deve ser confundido com revisor
+
+    original_divisions = tmp_path / "original_divisions"
+    original_divisions.mkdir()
+    (original_divisions / "revisor_1.csv").write_text("paragraph_id,entity_name,label\n", encoding="utf-8")
+
+    files = ra.discover_reviewer_files()
+    names = sorted(ra.reviewer_name_from_path(p) for p in files)
+
+    assert names == ["revisor_anderson", "revisor_bea"]
+
+
 def test_end_to_end_reconciliation_with_tmp_files(tmp_path, monkeypatch):
     data_dir = tmp_path
     monkeypatch.setattr(ra, "DATA_DIR", data_dir)
@@ -92,7 +115,7 @@ def test_end_to_end_reconciliation_with_tmp_files(tmp_path, monkeypatch):
         {
             "unit_id": "1-0-lula", "article_id": "1", "paragraph_id": "1-0", "entity_id": "lula",
             "entity_name": "Lula", "split": "train", "is_overlap": "True",
-            "reviewers": ";".join(ra.REVIEWERS), "source_name": "", "canonical_link": "",
+            "reviewers": ";".join(REVIEWER_NAMES), "source_name": "", "canonical_link": "",
             "paragraph_text": "Texto de sobreposição, todo mundo anota.",
         },
         {
@@ -107,7 +130,7 @@ def test_end_to_end_reconciliation_with_tmp_files(tmp_path, monkeypatch):
         writer.writeheader()
         writer.writerows(manifest_rows)
 
-    for i, reviewer in enumerate(ra.REVIEWERS, start=1):
+    for i, reviewer in enumerate(REVIEWER_NAMES, start=1):
         rows = [{"paragraph_id": "1-0", "entity_name": "Lula", "paragraph_text": "...", "label": "positivo", "intensity": "4", "notes": ""}]
         if reviewer == "revisor_1":
             rows.append({"paragraph_id": "2-0", "entity_name": "Lula", "paragraph_text": "...", "label": "negativo", "intensity": "", "notes": ""})

@@ -1,6 +1,8 @@
-"""Junta as planilhas devolvidas pelos 6 revisores (data/annotation/revisor_*.csv)
-de volta usando manifest.csv como chave, mede concordância entre anotadores
-nas linhas de sobreposição (Fleiss' kappa) e gera o dataset consolidado.
+"""Junta as planilhas devolvidas pelos revisores (data/annotation/revisor_*.csv,
+descobertas dinamicamente -- não depende de nome fixo tipo revisor_1..6,
+cada revisor renomeia a cópia com o próprio nome ao devolver) de volta
+usando manifest.csv como chave, mede concordância entre anotadores nas
+linhas de sobreposição (Fleiss' kappa) e gera o dataset consolidado.
 
 Filosofia (context.md raiz, seção 15): divergência entre anotadores deve
 ser REGISTRADA, não escondida atrás de uma média/maioria silenciosa. Por
@@ -31,7 +33,6 @@ from pathlib import Path
 BASE_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = BASE_DIR / "data" / "annotation"
 MANIFEST_PATH = DATA_DIR / "manifest.csv"
-REVIEWERS = [f"revisor_{i}" for i in range(1, 7)]
 
 VALID_LABELS = {"neutro", "negativo", "positivo", "indeterminado", "nao_relacionado"}
 # Tolerância a variação de digitação humana (acento, maiúscula, espaço) --
@@ -92,16 +93,37 @@ def load_manifest() -> dict[tuple[str, str], Unit]:
     return units
 
 
-def load_responses(units: dict[tuple[str, str], Unit]) -> list[str]:
-    """Preenche unit.responses lendo cada revisor_N.csv. Retorna avisos
-    (linhas que não bateram com nenhuma unidade do manifest -- paragraph_id
-    ou entity_name alterado sem querer, por exemplo)."""
+def discover_reviewer_files() -> list[Path]:
+    """Descobre dinamicamente quais planilhas de revisor já foram
+    devolvidas: qualquer `revisor_*.csv` direto em data/annotation/ (não
+    recursivo -- `Path.glob` não desce em subpastas, então
+    `original_divisions/` -- moldes vazios de backup, não resposta real --
+    fica de fora sem precisar de exclusão explícita). Os nomes reais
+    variam (revisor_bea.csv, revisor_anderson.csv, ...) e a lista cresce
+    conforme mais gente devolve; por isso não há mais uma lista fixa de 6
+    nomes hardcoded no módulo."""
+    return sorted(DATA_DIR.glob("revisor_*.csv"))
+
+
+def reviewer_name_from_path(path: Path) -> str:
+    """Identificador do revisor pro resto da lógica (relatório, rastreio de
+    quem respondeu o quê) -- o nome do arquivo sem `.csv`, ex.:
+    `revisor_anderson.csv` -> `revisor_anderson`."""
+    return path.stem
+
+
+def load_responses(units: dict[tuple[str, str], Unit]) -> tuple[list[str], list[str]]:
+    """Preenche unit.responses lendo cada revisor_*.csv encontrado em
+    data/annotation/. Retorna (nomes dos revisores encontrados, avisos --
+    linhas que não bateram com nenhuma unidade do manifest, por exemplo
+    paragraph_id ou entity_name alterado sem querer)."""
     warnings: list[str] = []
-    for reviewer in REVIEWERS:
-        path = DATA_DIR / f"{reviewer}.csv"
-        if not path.exists():
-            warnings.append(f"{reviewer}.csv não encontrado -- pulando (ainda não devolvido?)")
-            continue
+    reviewer_files = discover_reviewer_files()
+    reviewers = [reviewer_name_from_path(p) for p in reviewer_files]
+    if not reviewers:
+        warnings.append("nenhum arquivo revisor_*.csv encontrado em data/annotation/")
+    for path in reviewer_files:
+        reviewer = reviewer_name_from_path(path)
         with open(path, newline="", encoding="utf-8") as f:
             for row in csv.DictReader(f):
                 raw_label = (row.get("label") or "").strip()
@@ -125,7 +147,7 @@ def load_responses(units: dict[tuple[str, str], Unit]) -> list[str]:
                         notes=(row.get("notes") or "").strip(),
                     )
                 )
-    return warnings
+    return reviewers, warnings
 
 
 def fleiss_kappa(rows: list[Counter]) -> float | None:
@@ -208,7 +230,7 @@ def write_consolidated(units: list[Unit]) -> None:
     print(f"escrito {path}")
 
 
-def write_agreement_report(units: list[Unit], warnings: list[str]) -> None:
+def write_agreement_report(units: list[Unit], warnings: list[str], reviewers: list[str]) -> None:
     overlap_units = [u for u in units if u.is_overlap]
     answered_overlap = [u for u in overlap_units if u.responses]
 
@@ -216,12 +238,13 @@ def write_agreement_report(units: list[Unit], warnings: list[str]) -> None:
     kappa = fleiss_kappa(rows_for_kappa)
 
     disagreements = [u for u in answered_overlap if resolve_final_label(u)[0] == "PENDENTE_REVISAO"]
-    fully_answered = [u for u in overlap_units if len(u.responses) == len(REVIEWERS)]
+    fully_answered = [u for u in overlap_units if len(u.responses) == len(reviewers)]
 
     lines = ["# Relatório de concordância entre anotadores", ""]
+    lines.append(f"- Revisores com planilha devolvida até agora ({len(reviewers)}): {', '.join(sorted(reviewers)) if reviewers else '(nenhum)'}")
     lines.append(f"- Unidades de sobreposição no total: {len(overlap_units)}")
     lines.append(f"- Com pelo menos 1 resposta: {len(answered_overlap)}")
-    lines.append(f"- Respondidas pelos 6 revisores: {len(fully_answered)}")
+    lines.append(f"- Respondidas por todos os {len(reviewers)} revisores que já devolveram: {len(fully_answered)}")
     lines.append(f"- Fleiss' kappa (unidades com 2+ respostas): {kappa:.3f}" if kappa is not None else "- Fleiss' kappa: sem dado suficiente ainda")
     lines.append(f"- Unidades em discordância (PENDENTE_REVISAO): {len(disagreements)}")
     lines.append("")
@@ -254,14 +277,14 @@ def write_agreement_report(units: list[Unit], warnings: list[str]) -> None:
 
 def main() -> None:
     units_by_key = load_manifest()
-    warnings = load_responses(units_by_key)
+    reviewers, warnings = load_responses(units_by_key)
     units = list(units_by_key.values())
 
     answered = sum(1 for u in units if u.responses)
-    print(f"{answered} de {len(units)} unidades com pelo menos 1 resposta")
+    print(f"{answered} de {len(units)} unidades com pelo menos 1 resposta ({len(reviewers)} revisores encontrados: {', '.join(sorted(reviewers))})")
 
     write_consolidated(units)
-    write_agreement_report(units, warnings)
+    write_agreement_report(units, warnings, reviewers)
 
 
 if __name__ == "__main__":
