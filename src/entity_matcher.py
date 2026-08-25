@@ -18,8 +18,48 @@ class EntityMatch:
 
 _WORD_RE = re.compile(r"\w+", re.UNICODE)
 
+# Siglas de partido que são, ao mesmo tempo, palavra comum do português --
+# match case-insensitive causaria falso positivo (ex.: "os republicanos
+# americanos", cobertura de política internacional que já aparece no corpus
+# real, casaria com o partido brasileiro Republicanos). Validado contra
+# data/raw/articles_202608191040.csv (229 ocorrências reais de
+# "Republicanos"): quando é o partido de verdade, o texto SEMPRE escreve em
+# Title Case ("Republicanos", "Avante"), nunca em CAIXA ALTA nem em
+# minúsculo isolado no meio da frase. AGIR e DEMOCRATA são mais ambíguos
+# ("agir"/"democrata" também aparecem como palavra comum minúscula no meio
+# de frase), mas exigir Title Case ainda reduz bastante o risco -- ver
+# data/annotation/pendencias-tecnicas.md, item 3.
+#
+# A chave é sempre a forma normalizada (UPPER) do alias, porque a fonte de
+# dados (TSE, via `entidade_matching`) guarda sigla de partido em CAIXA
+# ALTA (ex.: "REPUBLICANOS") -- não dá pra confiar na capitalização de
+# entrada pra decidir SE o alias precisa de tratamento especial. O valor é
+# a forma Title Case correta, usada como o padrão comparado contra o texto,
+# já que é assim que a sigla aparece no texto real.
+_CASE_SENSITIVE_ALIASES: dict[str, str] = {
+    "REPUBLICANOS": "Republicanos",
+    "AVANTE": "Avante",
+    "CIDADANIA": "Cidadania",
+    "PODEMOS": "Podemos",
+    "SOLIDARIEDADE": "Solidariedade",
+    "AGIR": "Agir",
+    "DEMOCRATA": "Democrata",
+}
+
 
 def _exact_match(alias: str, paragraph: str) -> bool:
+    """Match exato por palavra (`\\b...\\b`), case-insensitive por padrão.
+
+    Exceção: aliases em `_CASE_SENSITIVE_ALIASES` (siglas de partido que
+    coincidem com palavra comum do português) exigem Title Case exato
+    (case-sensitive) -- ver comentário acima do dicionário. Pra todo o
+    resto (nomes de político, outros partidos), o comportamento continua
+    IGNORECASE normal."""
+    special_form = _CASE_SENSITIVE_ALIASES.get(alias.upper())
+    if special_form is not None:
+        pattern = r"\b" + re.escape(special_form) + r"\b"
+        return re.search(pattern, paragraph, re.UNICODE) is not None
+
     pattern = r"\b" + re.escape(alias) + r"\b"
     return re.search(pattern, paragraph, re.IGNORECASE | re.UNICODE) is not None
 
@@ -76,7 +116,14 @@ def match_entities(paragraph: str, entities: list[Entity], *, fuzzy_threshold: f
 
     Cada entidade contribui no máximo um EntityMatch por parágrafo, com o
     melhor apelido encontrado (maior score) -- múltiplas menções da mesma
-    entidade no mesmo parágrafo não geram matches duplicados."""
+    entidade no mesmo parágrafo não geram matches duplicados.
+
+    Aliases em `_CASE_SENSITIVE_ALIASES` (ver `_exact_match`) NUNCA caem no
+    fallback fuzzy: `_fuzzy_match_score` compara em minúsculo dos dois
+    lados, então "republicanos" ou "REPUBLICANOS" bateriam com score 1.0
+    ali mesmo com o exact match bloqueado -- reabriria exatamente o mesmo
+    falso positivo que o Title Case exigido no exact match existe pra
+    evitar."""
     matches: list[EntityMatch] = []
 
     for entity in entities:
@@ -86,6 +133,9 @@ def match_entities(paragraph: str, entities: list[Entity], *, fuzzy_threshold: f
             if _exact_match(alias, paragraph):
                 best = EntityMatch(entity_id=entity.id, match_type="exact", score=1.0, matched_alias=alias)
                 break  # exato já é o melhor resultado possível -- não precisa continuar
+
+            if alias.upper() in _CASE_SENSITIVE_ALIASES:
+                continue  # sem fallback fuzzy pra esses -- ver docstring acima
 
             fuzzy_score = _fuzzy_match_score(alias, paragraph)
             if fuzzy_score >= fuzzy_threshold and (best is None or fuzzy_score > best.score):

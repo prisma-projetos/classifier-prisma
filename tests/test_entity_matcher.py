@@ -117,6 +117,64 @@ def test_fuzzy_multiword_alias_still_matches_real_typo():
     assert matches[0].matched_alias == "presidente Lula"
 
 
+REPUBLICANOS = Entity(
+    id="republicanos",
+    canonical_name="REPUBLICANOS",
+    entity_type="party",
+    aliases=(),
+)
+
+
+def test_case_sensitive_alias_matches_title_case_in_text():
+    # "Republicanos" em Title Case é como o partido brasileiro aparece no
+    # texto real (validado contra data/raw/articles_202608191040.csv) --
+    # comportamento correto precisa continuar casando.
+    matches = match_entities(
+        "O Republicanos confirmou apoio à candidatura na convenção regional.",
+        [REPUBLICANOS],
+        fuzzy_threshold=0.85,
+    )
+
+    assert len(matches) == 1
+    assert matches[0].entity_id == "republicanos"
+    assert matches[0].match_type == "exact"
+
+
+def test_case_sensitive_alias_does_not_match_lowercase_common_word():
+    # "republicanos" minúsculo no meio da frase é a palavra comum (ex.: "os
+    # republicanos americanos"), não o partido -- era o bug (IGNORECASE
+    # fixo casava isso), agora não deve mais casar.
+    matches = match_entities(
+        "Os republicanos americanos reagiram à decisão da Casa Branca.",
+        [REPUBLICANOS],
+        fuzzy_threshold=0.85,
+    )
+
+    assert matches == []
+
+
+def test_case_sensitive_alias_does_not_match_uppercase_form():
+    # CAIXA ALTA não é como o texto real escreve o partido -- não deve
+    # casar, mesmo sendo a forma como o alias vem do TSE.
+    matches = match_entities(
+        "O REPUBLICANOS divulgou nota oficial sobre a filiação.",
+        [REPUBLICANOS],
+        fuzzy_threshold=0.85,
+    )
+
+    assert matches == []
+
+
+def test_non_risky_alias_still_matches_case_insensitively():
+    # Alias fora da lista de risco (ex.: "Lula") não pode ter o
+    # comportamento alterado -- continua IGNORECASE normal.
+    matches = match_entities("o presidente lula anunciou uma medida hoje.", ENTITIES, fuzzy_threshold=0.85)
+
+    assert len(matches) == 1
+    assert matches[0].entity_id == "lula"
+    assert matches[0].match_type == "exact"
+
+
 def test_fuzzy_multiword_alias_does_not_match_generic_country_mention():
     # "no Brasil" não deveria casar com o alias "União Brasil" -- mesmo
     # problema de palavra-âncora ("Brasil") dominando o score da janela
