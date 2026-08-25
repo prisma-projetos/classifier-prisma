@@ -1,84 +1,50 @@
-# Pendências técnicas encontradas durante a anotação manual
+# Pendências técnicas do classifier
 
-## Regras de anotação incorporadas em docs/protocolo-anotacao.md (RESOLVIDO — 2026-08-20)
+Consolidado em 2026-08-25 -- reorganizado pra separar o que já foi resolvido (registro histórico, resumido) do que ainda está em aberto (o backlog de verdade). Itens renumerados nessa reorganização; se algo antigo referenciar "item N", o número pode ter mudado.
 
-Esclarecimentos que surgiram lendo linha por linha com a Bea, complementares aos exemplos que já estavam no protocolo. Incorporados como itens 3, 4, 5 (subitem partido), 8, 9 e 10 da seção "Casos difíceis" do protocolo — urgente porque os outros 5 revisores já estavam anotando sem essas regras.
+## Em aberto
 
-1. **Autocitação/relato da própria pessoa não é elogio nem crítica de terceiro.** Se a própria entidade cita fatos favoráveis sobre si mesma (ex.: "reabertura de fábricas" citada pelo próprio Alckmin, que geriu a política), ou descreve sua própria ação/fala, é `neutro` -- só conta quando ALGUÉM DE FORA avalia explicitamente.
-2. **Só `positivo`/`negativo` quando há julgamento explícito no texto** -- uma palavra/frase de avaliação (elogio, crítica, "fracasso", "sucesso", "medíocre"), não um fato que o leitor PODE interpretar como bom ou ruim. Regra geral confirmada várias vezes pela Bea.
-3. **Sigla de partido entre parênteses, quando a crítica/elogio é claramente à pessoa, não ao partido** -- `neutro` para a entidade-partido (ver item 3 abaixo, já detalhado).
-4. **Resultado de apuração/investigação relatado sem palavra de julgamento = `neutro`**, mesmo quando contradiz um relato anterior (ex.: "não identificou indícios de procedimento irregular"). Só vira `negativo`/`positivo` quando alguém expressamente critica ou elogia o resultado.
-5. **Reação explícita de plateia/público conta** (aplausos, vaias, ser "contestado aos gritos") -- é uma avaliação de terceiro (o público), mesmo sem uma frase com sujeito claro.
-6. **Comparação metafórica explícita com uma figura amplamente positiva (ex.: comparar alguém a "o Pelé" de algo) conta como elogio de terceiro**, mesmo com hedging ("é difícil comparar, mas...").
+### 1. Migrar `entity_matcher`/`main.py` de `config/entities.yaml` pra `entidade_matching` (app_db2)
 
+Decisão já tomada (2026-08-24): o YAML manual vai ser extinto, fonte de entidades passa a ser só a tabela `entidade_matching`. Falta implementar:
 
-Achados ao ler linha por linha com a Bea (2026-08-20), ainda não implementados -- registrar aqui pra não perder, consolidar em `config/entities.yaml`/ADR quando a rodada de anotação terminar.
+- `src/entities_store.py`/`src/main.py` pararem de ler `config/entities.yaml`, passarem a carregar de `entidade_matching`.
+- Conferir que as 10 entidades hoje curadas à mão (Lula, Alckmin, Haddad, Tarcísio, Marina Silva, PT, PL, PSOL, União Brasil, Jair Bolsonaro) têm equivalente garantido na tabela nova antes do corte -- a maioria já tem (vieram do TSE como candidato real), mas não foi conferido um por um ainda.
+- `Entity.id` precisa virar a chave real do TSE (`nr_titulo_eleitoral_candidato` pra político, `nr_partido` pra partido) em vez do slug artificial atual (`"lula"`, `"pt"`).
+- `EntityMatch` (`src/entity_matcher.py`) e `ClassificationResult` (`src/pipeline.py`) precisam propagar um campo `entity_type` (`'politico'`/`'partido'`) -- hoje `entity.entity_type` existe mas é descartado no meio do caminho.
+- `classification_store._insert_classifications` precisa de um branch: político preenche `nr_titulo_eleitoral_candidato` (deixa `nr_partido` NULL), partido o inverso.
 
-## 1. `config/entities.yaml`: alias "Bolsonaro" da entidade `jair-bolsonaro` também casa com Flávio Bolsonaro
+### 2. `tabela_classificacao` (app_db2) sem idempotência nem auditoria de match
 
-Confirmado: parágrafo `24-0` ("Com colete à prova de balas, Renan Santos abre campanha e ataca Lula e Flávio Bolsonaro") nunca menciona "Jair Bolsonaro", só "Flávio Bolsonaro" -- mas gerou uma linha para a entidade `jair-bolsonaro` mesmo assim. Causa provável: `jair-bolsonaro` tem "Bolsonaro" (sozinho) como um dos aliases, que casa por match exato em qualquer menção a "Flávio Bolsonaro" também (mesmo sobrenome). Risco já previsto em `context.md` raiz, seção 7 ("erros de identificação de entidades com nomes semelhantes... políticos de mesmo sobrenome").
+Faltam duas colunas: `pipeline_version` (+ constraint única com artigo/parágrafo/entidade, pra reprocessar mensagem não duplicar linha) e uma coluna de auditoria do match (`evidencia_match JSONB`, guardando tipo/score/alias). SQL já entregue pra Bea (`ALTER TABLE tabela_classificacao ADD COLUMN...`) -- **não confirmado se já rodou** no banco de verdade. Conferir antes de considerar resolvido.
 
-Ajuste sugerido (não aplicado ainda): remover "Bolsonaro" sozinho dos aliases de `jair-bolsonaro`, manter só formas que não colidem com Flávio (ex.: "Jair Bolsonaro", "ex-presidente Bolsonaro", "presidente Bolsonaro").
+### 3. Partidos sem forma segura de alias (sigla = nome completo)
 
-## 2. PSB não está na lista curada de entidades
+7 partidos não têm uma forma "mais longa e segura" pra usar no lugar da sigla, porque a sigla JÁ É o nome inteiro: **AGIR, AVANTE, CIDADANIA, DEMOCRATA, PODEMOS, REPUBLICANOS, SOLIDARIEDADE** (+ PROGRESSISTAS/PP, risco menor, é sigla curta não palavra de dicionário). REPUBLICANOS é o mais grave -- partido do Tarcísio (53 candidatos no escopo B), e "os republicanos" também se refere ao partido americano em cobertura internacional que já aparece no corpus.
 
-`config/entities.yaml` tem 10 entidades (lula, jair-bolsonaro, geraldo-alckmin, fernando-haddad, tarcisio-de-freitas, marina-silva, pt, pl, psol, uniao-brasil) -- **PSB não está entre elas**, mesmo sendo o partido do próprio vice-presidente Geraldo Alckmin e aparecendo com frequência nos artigos (ex.: `250-1`: "O PSB oficializou... a candidatura do vice-presidente Geraldo Alckmin"). Curadoria a fazer: adicionar PSB (e revisar se falta algum outro partido relevante) em `config/entities.yaml`.
+**Solução validada contra dado real** (não é achismo -- testado em `data/raw/articles_202608191040.csv`, 229 ocorrências reais de "Republicanos"): esses partidos aparecem sempre em **Title Case** no texto ("Republicanos"), nunca em CAIXA ALTA. Then exigir Title Case exato (não case-insensitive) no match resolve Republicanos/Avante/Cidadania/Podemos/Solidariedade quase por completo, e reduz (não elimina) o risco de Democrata/Agir.
 
-## 3. RESOLVIDO: atribuição — sigla de partido entre parênteses ≠ avaliação do partido
+Implementação pendente: `_exact_match` (`src/entity_matcher.py`) precisa de uma flag por alias pra ligar/desligar `re.IGNORECASE` -- hoje é fixo pra todo alias. Código real, não SQL.
 
-Achado lendo `24-2` [Partido Liberal]: "Renan Santos... focando nas críticas... ao senador Flávio Bolsonaro (PL)". O match técnico está correto (o texto cita "PL"), mas a crítica é dirigida ao Flávio como pessoa -- o "(PL)" é só a filiação partidária entre parênteses, não uma avaliação do partido em si. Não é bug de matching (o entity_matcher fez o trabalho dele, achar a menção); é uma orientação de anotação: quando a sigla do partido aparece só como identificação do político citado, e a crítica/elogio é claramente à pessoa, classificar `neutro` para a entidade-partido (mesmo padrão de "crítica à medida vs. crítica à pessoa" do protocolo, estendido pra "crítica à pessoa vs. ao partido dela"). Incorporado como item 5 (subitem partido) de `docs/protocolo-anotacao.md`.
+### 4. Performance do `entity_matcher` em ~1.400 entidades
 
-## 4. RESOLVIDO (não é bug): "só reconhece 1 entidade" era o round-robin, não o matcher
+Nunca medido -- todo teste até agora foi com as 10 entidades do YAML. `entidade_matching` já tem 1.363 políticos + 30 partidos (escopo B). Antes de ligar isso em produção, medir tempo de processamento por parágrafo com o volume real.
 
-A Bea notou o padrão "texto menciona 3 entidades, só 1 vira linha" enquanto respondia a planilha. Investigados dois casos (`24-1` e `261-1`): em ambos o `entity_matcher` encontrou TODAS as entidades do parágrafo corretamente (`261-1`, por exemplo, gerou 6: Lula, Jair Bolsonaro, Alckmin, PT, PL, PSOL). O que a Bea via como "sumiço" era o **round-robin do `scripts/build_annotation_batches.py`**: cada revisor recebe só uma fatia das entidades de um mesmo parágrafo (exceto as de sobreposição, que vão pra todo mundo) -- ver `data/annotation/manifest.csv`, coluna `reviewers`, pra conferir quem ficou com qual entidade de um parágrafo. Não precisa de ajuste; é o comportamento pretendido pra dividir o volume entre os 6.
+### 5. Suspeita (não confirmada) de entidade não reconhecida em algum parágrafo
 
-## 5. RESOLVIDO: fuzzy match falso positivo de "União Brasil" em "no Brasil"
+Se aparecer um caso onde uma entidade mencionada no texto comprovadamente não gera NENHUMA linha em lugar nenhum (nem no manifest completo, não só no arquivo de um revisor), registrar aqui com o `paragraph_id` exato. Nenhum caso confirmado até agora -- os que pareciam isso eram round-robin (ver resolvidos).
 
-Corrigido em `fix: corrige fuzzy match de string inteira em aliases multi-palavra` (2026-08-20). Causa raiz: `_fuzzy_match_score` comparava a janela inteira concatenada contra o alias inteiro via `fuzz.ratio` -- uma palavra-âncora longa do alias ("União") dominava o score de caracteres, deixando "Brasil" (a palavra curta) quase irrelevante. "no Brasil" batia 85.7% contra "União Brasil", acima do `fuzzy_threshold` de 0.85. Corrigido comparando palavra por palavra (mesma posição no alias e na janela) e usando o mínimo dos scores -- um conector genérico no lugar da palavra de verdade agora derruba o score. Testes de regressão em `tests/test_entity_matcher.py`.
+### 6. Desempate de aliases da mesma entidade depende da ordem do YAML (baixa prioridade)
 
-## 6. RESOLVIDO: mesmo bug também afetava "presidente Lula" em "presidente da"
+Quando dois aliases da MESMA entidade empatam no score fuzzy, `match_entities` mantém o primeiro da lista (`fuzzy_score > best.score` é estritamente maior, não `>=`) -- quem "ganha" depende da ordem no YAML/tabela, não de especificidade. Confirmado que acontece (49 ocorrências reais, causadas por mojibake tipo `TarcÃsio` vs `Tarcísio`). Impacto só no campo de auditoria (`entity_matched_alias`), não na classificação em si -- baixa prioridade, mas some junto com o YAML se o item 1 for resolvido primeiro (a chave passa a ser TSE, não mais slug com múltiplos aliases artesanais).
 
-Mesma causa raiz do item 5, mesmo fix. Confirmado com o parágrafo `4-7` ("A presidente da Petrobras, Magda Chambriard, afirmou...") -- gerava uma linha falsa para `lula` (fuzzy, score 0.857, alias "presidente Lula") sem nunca mencionar Lula. Esse era o caso mais grave dos dois: "presidente da/na [qualquer coisa]" é uma construção comum demais em notícia política pra ser um falso positivo raro. Resolvido pelo mesmo fix do item 5, com teste de regressão dedicado.
+## Resolvido
 
-## 7. Suspeita (não confirmada) de entidade não reconhecida em algum parágrafo
-
-Item genuinamente em aberto (diferente do item 4, que foi fechado): se aparecer um caso onde uma entidade mencionada no texto comprovadamente não gera NENHUMA linha em lugar nenhum (nem no manifest completo, não só no arquivo de um revisor específico), registrar aqui com o `paragraph_id` exato.
-
-## 8. Desempate de aliases da mesma entidade depende da ordem do YAML (baixa prioridade)
-
-Investigado (2026-08-20), não corrigido de propósito -- é dívida pequena, não bug urgente. Em `match_entities`, quando dois aliases da MESMA entidade empatam no score fuzzy, o código mantém o primeiro candidato encontrado (`fuzzy_score > best.score` é estritamente maior, não `>=`) -- ou seja, quem "ganha" depende só da ordem em que os aliases aparecem em `config/entities.yaml`, não de uma regra de especificidade.
-
-Confirmado que acontece de verdade: 49 ocorrências no CSV real, causadas por mojibake (`TarcÃsio` vs `Tarcísio`) fazendo `Tarcisio`/`Tarcísio`/`Tarcísio de Freitas`/`Tarcisio de Freitas` empatarem no mesmo parágrafo -- nesses casos o alias mais específico venceu por coincidência de ordem no YAML. Em cenário sintético ("presidente Lulla"), o MENOS específico ("Lula") venceu, porque "presidente Lula" vem depois na lista de aliases.
-
-Impacto: nenhum na classificação em si (`entity_id`, `category`, `confidence`, `paragraph_index` não mudam) -- só o campo de auditoria `entity_matched_alias` (`classifications`, ver comentário na migration 0003) registra o alias "errado". Quem audita ainda vê a entidade certa, o trecho completo (`evidence_text`) e o score, então dá pra confirmar manualmente mesmo assim -- é qualidade de auditoria, não integridade de dado.
-
-Ajuste sugerido quando for feito: ao empatar, preferir o alias mais longo/específico em vez de manter o primeiro -- não depender da ordem do YAML, que é frágil (o próximo alias adicionado pode inverter o resultado "por sorte").
-
-## 9. Partidos sem forma segura de alias -- sigla é igual ao nome completo
-
-Achado populando `entidade_matching` a partir do TSE (2026-08-24). Pra a maioria dos partidos com sigla igual a palavra comum do português (ex.: "NOVO", "UNIÃO", "REDE"), a correção foi usar o nome completo em vez da sigla sozinha (ex.: `["NOVO"]` -> `["PARTIDO NOVO"]`). Mas **7 partidos não têm essa saída, porque a sigla JÁ É o nome completo** -- não existe forma mais longa/seguro pra cair:
-
-- AGIR
-- AVANTE
-- CIDADANIA
-- DEMOCRATA
-- PODEMOS (menos grave que "PODE" sozinho, mas "podemos" ainda é verbo comum)
-- REPUBLICANOS (**maior risco real** -- "os republicanos" é como o português se refere a apoiadores do Partido Republicano americano; nosso próprio corpus já tem notícia sobre tarifa/Trump/EUA onde isso apareceria. Também é o partido do Tarcísio, então não é partido de baixa relevância -- 53 candidatos no escopo B)
-- SOLIDARIEDADE
-
-Caso relacionado, risco menor (é sigla curta de 2 letras, não palavra do dicionário): PROGRESSISTAS (sigla "PP").
-
-**Opções levantadas:**
-1. Aceitar o risco (deixa como está)
-2. Desativar o match automático desses partidos por enquanto (`ativo = false` em `entidade_matching`) -- perde cobertura desses 7-8 partidos, mas não suja o resto do dado com falso positivo.
-3. Resolver com código no `entity_matcher`, exigindo contexto adicional -- ver solução recomendada abaixo.
-
-**Solução recomendada (2026-08-24, testada contra dado real, não é achismo):** sugestão de um amigo da Bea foi exigir que o alias apareça em CAIXA ALTA no texto pra contar como match (já que sigla de partido costuma ser escrita assim). Testei contra `data/raw/articles_202608191040.csv` (corpus real de notícias) e a premissa está errada: partido nunca aparece em CAIXA ALTA no texto corrido -- aparece em **Title Case** (primeira letra maiúscula só). Confirmado com 229 ocorrências reais de "Republicanos", todas em Title Case ("Tarcísio de Freitas (Republicanos)"), nunca "REPUBLICANOS". Exigir caixa alta zeraria a cobertura junto com o ruído.
-
-**Versão corrigida da ideia, validada pelo mesmo teste**: em vez de ignorar maiúscula/minúscula (como o matcher faz hoje, `re.IGNORECASE` fixo em `_exact_match`), exigir Title Case exato ("Republicanos", não "republicanos" nem "REPUBLICANOS") pra esses aliases específicos. Funciona bem pra Republicanos/Avante/Cidadania/Podemos/Solidariedade (sempre Title Case quando é o partido de verdade, no corpus real). Reduz bastante (não elimina 100%, por causa de maiúscula de início de frase) o risco de Democrata/Agir -- esses dois são os mais ambíguos: "Agir" apareceu 4x no corpus, 3 delas como o VERBO comum ("é o momento de agir"), minúsculo, não o partido.
-
-Implementação: `_exact_match` (`src/entity_matcher.py`) precisa de uma flag por alias pra ligar/desligar `re.IGNORECASE` -- mudança de código real, não SQL. Ainda não implementado.
-
-## 10. `config/entities.yaml` será extinto -- fonte passa a ser só `entidade_matching`
-
-Decisão da Bea (2026-08-24): o YAML manual não vai mais coexistir com a tabela nova -- `src/main.py`/`entities_store.py` precisam parar de ler `config/entities.yaml` e passar a carregar a lista de entidades a partir de `entidade_matching` (o banco `app_db2`). As 10 entidades hoje curadas à mão no YAML (Lula, Alckmin, Haddad, Tarcísio, Marina Silva, PT, PL, PSOL, União Brasil, Jair Bolsonaro) precisam ter equivalente garantido na tabela nova antes do corte -- várias já têm (vieram do TSE como candidato real), mas vale conferir uma por uma antes de desligar o YAML de vez, pra não perder nenhuma. Não implementado ainda.
+- **Regras de anotação** (autocitação, julgamento explícito, partido entre parênteses, apuração sem julgamento, reação de plateia, comparação metafórica) -- incorporadas em `docs/protocolo-anotacao.md`.
+- **Alias "Bolsonaro" sozinho** em `jair-bolsonaro` (casava com Flávio/Michelle/Carlos) -- removido do `config/entities.yaml`. "Tarcísio"/"Tarcisio" soltos e "PT de Lula" também removidos por precaução.
+- **PSB ausente da lista curada** -- superado pela migração pra `entidade_matching` (PSB já vem do TSE como partido real).
+- **"Só reconhece 1 entidade"** -- não era bug, era o round-robin do `build_annotation_batches.py` dividindo entidades de um mesmo parágrafo entre revisores diferentes.
+- **Fuzzy match de string inteira** -- `_fuzzy_match_score` comparava a janela inteira concatenada em vez de palavra por palavra, causando falso positivo em "União Brasil"/"no Brasil" e "presidente Lula"/"presidente da". Corrigido comparando palavra por palavra com o mínimo dos scores. Testes de regressão em `tests/test_entity_matcher.py`.
+- **Duplicata de partido em `entidade_matching`** -- script de inserção rodado duas vezes sem `DELETE` antes, causando cada partido aparecer 2x. Corrigido com `DELETE` mantendo o `id` mais baixo.
+- **53 aliases de político com colisão de nome comprovada por dado real** -- palavra aparecendo em 2+ candidatos reais diferentes entre os 20.724 do TSE (ex.: FERREIRA 703x, RENAN em duas pessoas diferentes, REGINALDO em duas pessoas diferentes). Removidos via `UPDATE`, mantendo o nome completo de cada um.
+- **Duplicata dentro do próprio array de aliases** (ex.: `["REPUBLICANOS", "REPUBLICANOS"]`, quando sigla = nome do partido) -- corrigido com `jsonb_agg(DISTINCT elem)`.
