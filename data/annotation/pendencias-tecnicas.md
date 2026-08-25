@@ -68,9 +68,17 @@ Achado populando `entidade_matching` a partir do TSE (2026-08-24). Pra a maioria
 
 Caso relacionado, risco menor (é sigla curta de 2 letras, não palavra do dicionário): PROGRESSISTAS (sigla "PP").
 
-**Opções levantadas, nenhuma aplicada ainda:**
+**Opções levantadas:**
 1. Aceitar o risco (deixa como está)
-2. Desativar o match automático desses partidos por enquanto (`ativo = false` em `entidade_matching`) -- perde cobertura desses 7-8 partidos, mas não suja o resto do dado com falso positivo. Opção mais segura pro tipo de produto (público, erro de classificação tem custo de credibilidade -- `context.md` raiz).
-3. Resolver com código no `entity_matcher`: exigir contexto adicional pra aceitar esses aliases sozinhos (ex.: só casar se aparecer entre parênteses logo depois de um nome de pessoa, padrão real de como o texto cita partido: "Fulano (REPUBLICANOS)"). É a única forma de manter cobertura sem o ruído, mas é mudança de código de verdade, não SQL -- não é pra agora.
+2. Desativar o match automático desses partidos por enquanto (`ativo = false` em `entidade_matching`) -- perde cobertura desses 7-8 partidos, mas não suja o resto do dado com falso positivo.
+3. Resolver com código no `entity_matcher`, exigindo contexto adicional -- ver solução recomendada abaixo.
 
-Decisão de qual caminho seguir ainda em aberto.
+**Solução recomendada (2026-08-24, testada contra dado real, não é achismo):** sugestão de um amigo da Bea foi exigir que o alias apareça em CAIXA ALTA no texto pra contar como match (já que sigla de partido costuma ser escrita assim). Testei contra `data/raw/articles_202608191040.csv` (corpus real de notícias) e a premissa está errada: partido nunca aparece em CAIXA ALTA no texto corrido -- aparece em **Title Case** (primeira letra maiúscula só). Confirmado com 229 ocorrências reais de "Republicanos", todas em Title Case ("Tarcísio de Freitas (Republicanos)"), nunca "REPUBLICANOS". Exigir caixa alta zeraria a cobertura junto com o ruído.
+
+**Versão corrigida da ideia, validada pelo mesmo teste**: em vez de ignorar maiúscula/minúscula (como o matcher faz hoje, `re.IGNORECASE` fixo em `_exact_match`), exigir Title Case exato ("Republicanos", não "republicanos" nem "REPUBLICANOS") pra esses aliases específicos. Funciona bem pra Republicanos/Avante/Cidadania/Podemos/Solidariedade (sempre Title Case quando é o partido de verdade, no corpus real). Reduz bastante (não elimina 100%, por causa de maiúscula de início de frase) o risco de Democrata/Agir -- esses dois são os mais ambíguos: "Agir" apareceu 4x no corpus, 3 delas como o VERBO comum ("é o momento de agir"), minúsculo, não o partido.
+
+Implementação: `_exact_match` (`src/entity_matcher.py`) precisa de uma flag por alias pra ligar/desligar `re.IGNORECASE` -- mudança de código real, não SQL. Ainda não implementado.
+
+## 10. `config/entities.yaml` será extinto -- fonte passa a ser só `entidade_matching`
+
+Decisão da Bea (2026-08-24): o YAML manual não vai mais coexistir com a tabela nova -- `src/main.py`/`entities_store.py` precisam parar de ler `config/entities.yaml` e passar a carregar a lista de entidades a partir de `entidade_matching` (o banco `app_db2`). As 10 entidades hoje curadas à mão no YAML (Lula, Alckmin, Haddad, Tarcísio, Marina Silva, PT, PL, PSOL, União Brasil, Jair Bolsonaro) precisam ter equivalente garantido na tabela nova antes do corte -- várias já têm (vieram do TSE como candidato real), mas vale conferir uma por uma antes de desligar o YAML de vez, pra não perder nenhuma. Não implementado ainda.
