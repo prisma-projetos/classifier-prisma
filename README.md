@@ -16,15 +16,12 @@ Não é responsabilidade deste componente: coletar conteúdo, gerar análise agr
 
 ## Arquitetura resumida
 
-### Dois modos de execução — não confundir
+### Modo de execução
 
-| | `src/main.py` | `src/notify_analyser.py` |
-|---|---|---|
-| O que faz | Consome a fila do Scraper, classifica e persiste | Publica notificações pendentes para o Analyser |
-| Tipo de processo | Daemon (contínuo, fica rodando) | Roda uma vez e sai |
-| Como operar | Mantido no ar (ex.: serviço/supervisor) | Agendado (ex.: cron) |
+Dois processos de produção (ver ADR 0004):
 
-Motivo de serem dois processos separados: consumir fila é inerentemente contínuo; publicar o que está pendente na tabela de outbox é um lote com início e fim. Ver docstrings de ambos os arquivos para mais detalhe.
+- `src/main.py` — daemon (contínuo) que consome a fila do Scraper, classifica, persiste em `tabela_classificacao` e enfileira a notificação pendente pro Analyser em `classifier_analyser_outbox`, na mesma transação, antes do commit. Não publica nada no RabbitMQ diretamente. Precisa ficar no ar (ex.: serviço/supervisor).
+- `src/notify_analyser.py` — processo separado ("roda uma vez e sai", agendável via cron) que drena `classifier_analyser_outbox` e publica de fato no RabbitMQ, com retry e circuit breaker.
 
 ### Fluxo de classificação (pipeline)
 
@@ -36,12 +33,12 @@ Para cada mensagem consumida (um conteúdo):
 
 O resultado é uma linha por (parágrafo, entidade) — `src/pipeline.py` é uma função pura, testável sem banco/fila.
 
-### Persistência e integração — padrão outbox
+### Persistência e integração
 
-Segue o padrão outbox transacional já decidido em ADR, nas duas fronteiras:
-
-- **Scraper → Classifier**: consumo via RabbitMQ, sem acesso direto ao Postgres do scraper. Ver [ADR 0001](docs/adr/0001-scraper-classifier-rabbitmq-outbox.md).
-- **Classifier → Analyser**: resultado e notificação pendente são gravados na mesma transação (`analyser_notifications`); um publisher separado (`src/notify_analyser.py`) drena essa tabela depois, com retry. Nome de fila/exchange dessa fronteira **ainda não confirmado com o DevOps** (placeholders no `.env.example`). Ver [ADR 0002](docs/adr/0002-system-db-compartilhado-outbox-analyser.md).
+- **Scraper → Classifier**: consumo via RabbitMQ, sem acesso direto ao Postgres do scraper, padrão outbox do lado do scraper. Ver [ADR 0001](docs/adr/0001-scraper-classifier-rabbitmq-outbox.md).
+- **Classifier grava em `tabela_classificacao`**, no System DB compartilhado `app_db2` (não mais nas tabelas próprias do Classifier — ver "Tabelas principais" abaixo).
+- **Classifier → Analyser**: outbox transacional próprio (`classifier_analyser_outbox`, tabela de uso interno do Classifier dentro do `app_db2` — não faz parte do modelo de dados compartilhado). `src/message_handler.py` grava o payload de notificação nessa tabela NA MESMA transação do `INSERT` em `tabela_classificacao`, antes do commit — nunca publica no RabbitMQ diretamente. Um processo separado, `src/notify_analyser.py` (agendável via cron), drena as linhas pendentes e publica de fato no RabbitMQ, com retry (`attempts`/`max_attempts`) e circuit breaker de falhas consecutivas. Essa é a decisão vigente (ADR 0004) — supera a publicação direta e síncrona da ADR 0003 (que perdia notificação silenciosamente se o RabbitMQ estivesse fora do ar no momento da publicação) sem repetir o impasse da ADR 0002 (lá, o outbox seria uma tabela do schema *compartilhado*, sem dono definido; aqui é uma tabela de uso exclusivo do Classifier). Contrato de payload e nome de fila/exchange **ainda não confirmados** (nem com o DevOps, nem com quem for implementar o consumidor do lado do Analyser). Ver [ADR 0002](docs/adr/0002-system-db-compartilhado-outbox-analyser.md) e [ADR 0003](docs/adr/0003-notificacao-analyser-publicacao-direta.md) (contexto histórico) e [ADR 0004](docs/adr/0004-outbox-proprio-para-notificacao-analyser.md) (decisão vigente).
+- `src/notify_analyser.py`, `src/notification_publisher.py` e `src/notifications_store.py` foram reativados e adaptados para `classifier_analyser_outbox` — fazem parte do fluxo de produção de novo (precisam estar agendados via cron ou equivalente; sem isso o outbox acumula `pending` sem nunca ser drenado).
 
 Em produção o Classifier não declara/cria topologia nenhuma no RabbitMQ (nem para consumo, nem para notificação) — isso é responsabilidade do DevOps. O RabbitMQ do `docker-compose.yml` é só para desenvolvimento local e já sobe com a topologia provisionada (ver [`docker/rabbitmq/README.md`](docker/rabbitmq/README.md)).
 
@@ -51,12 +48,15 @@ Em produção o Classifier não declara/cria topologia nenhuma no RabbitMQ (nem 
 - `config/lexicon.yaml` — lista artesanal de termos positivos/negativos em PT-BR. Não é um léxico validado academicamente (não é SentiLex-PT nem OpLexicon) — é ponto de partida da baseline.
 - `config/settings.yaml` — threshold do fuzzy matching, nome/versão do modelo gravados em cada execução, caminho do arquivo de log.
 
-### Tabelas principais (`db/migrations/`)
+### Tabelas principais
 
-- `political_entities` — cópia sincronizada de `config/entities.yaml`, dá `id` estável para as tabelas de resultado referenciarem.
-- `classification_runs` — uma linha por conteúdo processado (uma execução do pipeline); garante idempotência via `UNIQUE (article_id, pipeline_version)`.
-- `classifications` — resultado individual: uma linha por (parágrafo, entidade), com categoria, confiança e evidência textual.
-- `analyser_notifications` — outbox da fronteira Classifier → Analyser, drenada por `src/notify_analyser.py`.
+Em **produção**, o Classifier grava em `tabela_classificacao` (System DB compartilhado `app_db2`, schema gerenciado por outra pessoa da equipe via DBeaver — não faz parte de `db/migrations/` deste repositório). Uma linha por (parágrafo, entidade) identificada, com FK para `tabela_politico`/`tabela_partido`/`tabela_midia`, categoria, confiança, evidência (`paragrafo_analisado`) e auditoria de match (`evidencia_match`). Idempotência via `ON CONFLICT` na constraint `uq_tabela_classificacao_idempotencia` (article + parágrafo + entidade + pipeline_version) — ver `src/classification_store.py::persist_classification_result_v2`.
+
+`db/migrations/` (aplicadas só em `classifier_test`, nunca em `app_db2`) cobrem duas coisas:
+
+- `0001`-`0004` — schema ANTIGO e órfão do Classifier (`political_entities`, `classification_runs`, `classifications`, `analyser_notifications`) — não é mais gravado em produção, mantido por não haver necessidade comprovada de removê-lo agora.
+- `0005` — réplica **só para teste** do schema novo confirmado em `app_db2` (`tabela_classificacao`, `tabela_midia`, `tabela_politico`, `tabela_partido`) — permite testar `persist_classification_result_v2`/`resolve_id_midia` isolado, sem depender de rede até o banco real. Mantida manualmente em sincronia com o schema real; não há automação ligando os dois hoje.
+- `0006` — réplica **só para teste** de `classifier_analyser_outbox` (ver ADR 0004) — mesma lógica da `0005`: a tabela real é criada manualmente em `app_db2` (`scripts/sql/003_classifier_analyser_outbox.sql`), não por estas migrations.
 
 ## Como rodar localmente
 
@@ -79,15 +79,20 @@ python3.14 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 
-# 4. Rodar o consumidor (processo contínuo — fica no ar consumindo a fila do Scraper)
+# 4. Rodar o consumidor (processo contínuo — fica no ar consumindo a fila do
+# Scraper, classifica, persiste em tabela_classificacao e enfileira a
+# notificação pendente em classifier_analyser_outbox, na mesma transação —
+# ver ADR 0004)
 python src/main.py
+```
 
-# 5. Em outro momento/terminal, publicar notificações pendentes para o Analyser
-# (roda uma vez e sai — em produção seria agendado via cron)
+`src/notify_analyser.py` é o segundo processo de produção ("roda uma vez e sai", agendável via cron) — drena `classifier_analyser_outbox` e publica de fato no RabbitMQ. Precisa ser executado periodicamente (cron ou equivalente); sem isso, as notificações ficam acumuladas como `pending` e nunca chegam ao Analyser:
+
+```bash
 python src/notify_analyser.py
 ```
 
-O consumidor (`src/main.py`) aplica migrations do System DB e sincroniza `config/entities.yaml` para o banco automaticamente ao subir — não é preciso rodar nada manualmente antes.
+Em produção o consumidor (`src/main.py`) **não** roda migrations do System DB (`app_db2` é gerenciado por outra pessoa da equipe, ver comentário no próprio arquivo) — só em `classifier_test`, via `tests/conftest.py`.
 
 **Se você já tem um Postgres local (ex.: instalado via Homebrew, ouvindo em `5432`)**: `docker compose up -d` sobe um SEGUNDO Postgres no mesmo host/porta, e qual dos dois efetivamente atende `localhost:5432` fica ambíguo (depende de como o Docker Desktop/OrbStack expõe a porta). Nesse caso, suba só o RabbitMQ (`docker compose up -d rabbitmq`) e use o Postgres que já está rodando — ele funciona normalmente, o classifier só precisa que `POSTGRES_HOST`/`POSTGRES_PORT` no `.env` apontem pra ele.
 
@@ -117,7 +122,13 @@ Todas descritas com comentário completo em [`.env.example`](.env.example). Resu
 pytest
 ```
 
-Os testes usam um banco de teste isolado (`POSTGRES_TEST_DB`), criado e com as migrations aplicadas automaticamente pelo `tests/conftest.py` — não é preciso preparar banco manualmente, só ter Postgres no ar (`docker compose up -d`) e o `.env` configurado. As tabelas de dados são limpas (`TRUNCATE`) antes de cada teste.
+Os testes usam um banco de teste isolado (`POSTGRES_TEST_DB`), criado e com as migrations aplicadas automaticamente pelo `tests/conftest.py` — não é preciso preparar banco manualmente, só ter Postgres no ar (`docker compose up -d`) e o `.env` configurado. As tabelas de dados são limpas (`TRUNCATE`) antes de cada teste, incluindo a réplica de teste do schema novo (`tabela_classificacao`, `tabela_midia`, `tabela_politico`, `tabela_partido` — ver `db/migrations/0005`) e a réplica de `classifier_analyser_outbox` (`db/migrations/0006`).
+
+Publicação no RabbitMQ nunca é testada contra um broker real:
+- `tests/test_message_handler.py` verifica que `handle_message` grava a linha certa em `classifier_analyser_outbox`, na mesma transação de `tabela_classificacao` (inclui um teste de atomicidade que força uma falha entre a gravação do outbox e o commit).
+- `tests/test_notification_publisher.py` injeta um publisher fake (`Publisher` Protocol) para testar claim/retry/circuit-breaker/idempotência do publisher do outbox, sem depender de infraestrutura externa.
+
+Exceção: `tests/test_entities_store.py` conecta diretamente ao `app_db2` real (só leitura) para validar o recorte de entidades v1 contra dado de verdade — não usa `classifier_test`, porque `entidade_matching`/`tabela_candidatura` são gerenciadas fora deste repositório e não têm réplica de teste. Precisa de rede até o `app_db2` para rodar.
 
 ## Limitações conhecidas da baseline v1 (léxico/regra)
 
@@ -132,6 +143,14 @@ Essa baseline existe para validar o pipeline ponta a ponta e servir de referênc
 ## Decisões em aberto / próximos passos
 
 Ver [`context.md`, seção 9](context.md#9-decisões-em-aberto-específicas-deste-repositório) — inclui a técnica de classificação definitiva pós-baseline, correferência de entidade, dono das migrations do System DB quando o Analyser existir, e confirmação com o DevOps do nome da fila/exchange da notificação Classifier→Analyser.
+
+Pendências específicas da notificação ao Analyser (ver [ADR 0003](docs/adr/0003-notificacao-analyser-publicacao-direta.md) e [ADR 0004](docs/adr/0004-outbox-proprio-para-notificacao-analyser.md)):
+
+- Formato do payload de notificação (`src/analyser_notifier.py::build_notification_payload`) precisa ser validado com quem implementar o consumidor do lado do Analyser — não é contrato fechado.
+- Nome de fila/exchange/routing key desta fronteira ainda não confirmados com o DevOps.
+- `src/notify_analyser.py` precisa ser agendado em produção (cron ou equivalente) — sem isso, o outbox acumula notificações `pending` sem nunca ser drenado.
+- `notificado_em` no payload reflete "quando a classificação foi enfileirada", não "quando foi de fato publicada no RabbitMQ" (pode haver atraso, ver ADR 0004) — avisar o time do Analyser quando o contrato de payload for validado.
+- Mapeamento `ScraperPayload.source_name` → `tabela_midia.nome_midia` (`src/classification_store.py::resolve_id_midia`) usa lookup exato case-insensitive; não há confirmação de que os valores reais de `source_name` enviados pelo `scrapping-prisma` batem exatamente com os nomes cadastrados em `tabela_midia` — vale confirmar com quem mantém o scraper.
 
 ## Estrutura de pastas
 

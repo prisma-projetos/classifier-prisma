@@ -4,6 +4,7 @@ __pycache__/
 .venv/
 venv/
 logs/*.log
+data/exports/
 .pytest_cache/
 .DS_Store
 *.bak

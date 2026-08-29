@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -8,6 +9,11 @@ import psycopg
 import yaml
 
 VALID_ENTITY_TYPES = {"politician", "party"}
+
+# Valores reais da coluna `entidade_matching.entity_type` (banco compartilhado
+# `app_db2`) -- diferentes dos valores usados pelo YAML legado acima
+# (`politician`/`party`). Ver `load_active_entities_from_db`.
+DB_ENTITY_TYPES = {"politico", "partido"}
 
 
 @dataclass(frozen=True)
@@ -159,3 +165,109 @@ def sync_entities(conn: psycopg.Connection, entities: list[Entity]) -> SyncResul
                 updated += 1
 
     return SyncResult(inserted=inserted, updated=updated)
+
+
+def load_active_entities_from_db(
+    conn: psycopg.Connection, cargos: Sequence[str]
+) -> list[Entity]:
+    """Carrega entidades ativas de `entidade_matching` (System DB
+    compartilhado `app_db2` -- ver classifier-prisma/context.md) para uso em
+    `src/entity_matcher.py`. É a fonte usada em produção a partir desta
+    migração (chamada por `src/main.py`), no lugar de `load_and_validate()`
+    (YAML) -- `entidade_matching` é gerenciada por outro processo (ingestão
+    do TSE), então esta função só LÊ, nunca escreve (não existe
+    equivalente a `sync_entities` para ela).
+
+    `Entity.id` vira a chave real da entidade -- `nr_titulo_eleitoral_candidato`
+    quando `entity_type='politico'`, `nr_partido` quando `entity_type='partido'`
+    -- sempre como string, mesmo formato usado depois em
+    `EntityMatch.entity_id` (src/entity_matcher.py) e na gravação em
+    `tabela_classificacao` (src/classification_store.py). `Entity.entity_type`
+    usa os valores reais da coluna (`'politico'`/`'partido'`, ver
+    `DB_ENTITY_TYPES`), diferente dos valores do YAML legado
+    (`'politician'`/`'party'`, ver `VALID_ENTITY_TYPES`).
+
+    `cargos`: recorte de fase da v1 (decisão da equipe, 2026-08-28 -- ver
+    data/annotation/pendencias-tecnicas.md) -- NÃO é limitação técnica.
+    Filtra políticos cujo `ds_cargo` esteja nessa lista (ex.:
+    `['PRESIDENTE', 'VICE-PRESIDENTE']`, configurável em
+    `config/settings.yaml`, seção `entity_scope.cargos`) e só os partidos
+    (`entity_type='partido'`) associados a esses candidatos. `ds_cargo` só é
+    populado em `entidade_matching` para `entity_type='politico'` -- não dá
+    pra filtrar partido direto por essa coluna. O vínculo candidato->partido
+    não existe dentro de `entidade_matching` (`nr_partido` só é preenchido
+    para `entity_type='partido'`) -- por isso o JOIN com
+    `tabela_candidatura` (mesmo schema compartilhado), usando
+    `nr_titulo_eleitoral_candidato` como chave. Cast explícito
+    (`nr_partido::integer`) porque `entidade_matching.nr_partido` é `text`
+    e `tabela_candidatura.nr_partido` é `integer`.
+
+    NÃO filtra nem altera a coluna `ativo` de `entidade_matching` além do
+    `WHERE ativo = true` que já existia -- esse campo é compartilhado com
+    outros componentes da plataforma (ver pendencias-tecnicas.md); o recorte
+    de fase é só nesta query de leitura.
+
+    Levanta `ValueError` se encontrar uma linha com `entity_type` fora do
+    esperado ou sem a chave correspondente preenchida -- falha alta e
+    explícita, em vez de deixar essa entidade quebrar o matching
+    silenciosamente mais adiante."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            WITH presidenciaveis AS (
+                SELECT em.nr_titulo_eleitoral_candidato,
+                       em.entity_type,
+                       em.nome_principal,
+                       em.aliases,
+                       tc.nr_partido AS nr_partido_candidatura
+                FROM entidade_matching em
+                JOIN tabela_candidatura tc
+                  ON tc.nr_titulo_eleitoral_candidato = em.nr_titulo_eleitoral_candidato
+                WHERE em.entity_type = 'politico'
+                  AND em.ativo = true
+                  AND em.ds_cargo = ANY(%(cargos)s)
+            )
+            SELECT entity_type, nr_titulo_eleitoral_candidato, NULL::text AS nr_partido,
+                   nome_principal, aliases
+            FROM presidenciaveis
+
+            UNION ALL
+
+            SELECT em.entity_type, NULL::text AS nr_titulo_eleitoral_candidato,
+                   em.nr_partido, em.nome_principal, em.aliases
+            FROM entidade_matching em
+            WHERE em.entity_type = 'partido'
+              AND em.ativo = true
+              AND em.nr_partido::integer IN (
+                  SELECT DISTINCT nr_partido_candidatura FROM presidenciaveis
+              )
+            """,
+            {"cargos": list(cargos)},
+        )
+        rows = cur.fetchall()
+
+    entities: list[Entity] = []
+    for entity_type, nr_titulo, nr_partido, nome_principal, aliases in rows:
+        if entity_type not in DB_ENTITY_TYPES:
+            raise ValueError(
+                f"entidade_matching: entity_type {entity_type!r} inesperado para "
+                f"{nome_principal!r} (esperado um de {sorted(DB_ENTITY_TYPES)})"
+            )
+
+        entity_id = nr_titulo if entity_type == "politico" else nr_partido
+        if not entity_id:
+            raise ValueError(
+                f"entidade_matching: entidade {nome_principal!r} (entity_type={entity_type!r}) "
+                "sem chave preenchida (nr_titulo_eleitoral_candidato/nr_partido nulo ou vazio)"
+            )
+
+        entities.append(
+            Entity(
+                id=str(entity_id),
+                canonical_name=nome_principal,
+                entity_type=entity_type,
+                aliases=tuple(aliases or []),
+            )
+        )
+
+    return entities

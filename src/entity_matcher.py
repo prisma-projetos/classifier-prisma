@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from functools import lru_cache
 
-from rapidfuzz import fuzz
+from rapidfuzz import fuzz, process
 
 from entities_store import Entity
 
@@ -11,6 +12,7 @@ from entities_store import Entity
 @dataclass(frozen=True)
 class EntityMatch:
     entity_id: str
+    entity_type: str  # 'politico' | 'partido' (vem de Entity.entity_type)
     match_type: str  # 'exact' | 'fuzzy'
     score: float  # 0.0-1.0
     matched_alias: str
@@ -47,6 +49,19 @@ _CASE_SENSITIVE_ALIASES: dict[str, str] = {
 }
 
 
+# Cada alias vira um regex distinto. O cache interno do módulo `re` guarda só
+# 512 padrões, e o volume real da migração pra `entidade_matching` são ~4.100
+# aliases (~1.400 entidades) -- ou seja, o cache vira thrash e TODOS os
+# padrões são recompilados a cada parágrafo. Medido em
+# scripts/benchmark_entity_matcher.py: 30,9 ms/parágrafo só de exact match,
+# contra 5,7 ms com os padrões já compilados. Cache próprio, dimensionado pro
+# volume esperado -- se estourar, o pior caso é voltar a recompilar (degrada,
+# não quebra).
+@lru_cache(maxsize=8192)
+def _alias_pattern(alias: str, flags: int) -> re.Pattern[str]:
+    return re.compile(r"\b" + re.escape(alias) + r"\b", flags)
+
+
 def _exact_match(alias: str, paragraph: str) -> bool:
     """Match exato por palavra (`\\b...\\b`), case-insensitive por padrão.
 
@@ -57,11 +72,9 @@ def _exact_match(alias: str, paragraph: str) -> bool:
     IGNORECASE normal."""
     special_form = _CASE_SENSITIVE_ALIASES.get(alias.upper())
     if special_form is not None:
-        pattern = r"\b" + re.escape(special_form) + r"\b"
-        return re.search(pattern, paragraph, re.UNICODE) is not None
+        return _alias_pattern(special_form, re.UNICODE).search(paragraph) is not None
 
-    pattern = r"\b" + re.escape(alias) + r"\b"
-    return re.search(pattern, paragraph, re.IGNORECASE | re.UNICODE) is not None
+    return _alias_pattern(alias, re.IGNORECASE | re.UNICODE).search(paragraph) is not None
 
 
 def _fuzzy_match_score(alias: str, paragraph: str) -> float:
@@ -102,6 +115,180 @@ def _fuzzy_match_score(alias: str, paragraph: str) -> float:
     return best_score
 
 
+# ---------------------------------------------------------------------------
+# Pré-filtro de candidatos (otimização de performance, não muda o resultado)
+# ---------------------------------------------------------------------------
+#
+# Sem pré-filtro, cada parágrafo paga `_exact_match` + `_fuzzy_match_score`
+# para TODOS os aliases de TODAS as entidades. Com o volume real (~1.400
+# entidades / ~4.100 aliases) isso são ~4.100 regex + ~4.100 varreduras de
+# janela por parágrafo -- e, medido, quase nada disso tem chance de casar:
+# sobram ~12 aliases plausíveis por parágrafo.
+#
+# O filtro se apoia numa propriedade dos dois caminhos de match:
+#
+#   * `_fuzzy_match_score` só devolve >= threshold se existir uma janela em
+#     que TODA palavra do alias tem `fuzz.ratio` >= threshold com a palavra
+#     da mesma posição. Logo, é condição NECESSÁRIA que cada palavra do
+#     alias tenha ratio >= threshold com ALGUMA palavra do parágrafo.
+#
+#   * `_exact_match` (`\balias\b`) só casa se o trecho do parágrafo for o
+#     alias inteiro, com fronteira de palavra nas pontas -- então toda
+#     palavra `\w+` do alias aparece como palavra `\w+` completa do
+#     parágrafo, o que é o caso particular ratio == 100.
+#
+# Então basta descobrir, uma vez por parágrafo, quais palavras do vocabulário
+# de aliases têm alguma palavra parecida no parágrafo. Isso é uma comparação
+# de N palavras do parágrafo contra M palavras de vocabulário, feita dentro
+# do rapidfuzz (`process.extract`, laço em C com corte por score) em vez de
+# ~4.100 chamadas Python.
+#
+# O filtro é conservador de propósito: ele só descarta alias que
+# comprovadamente não pode casar. Alias que sobrevive continua passando pelo
+# `_exact_match`/`_fuzzy_match_score` originais, sem atalho -- o resultado de
+# `match_entities` é idêntico ao de antes. Isso vale também pros aliases em
+# `_CASE_SENSITIVE_ALIASES`: o filtro compara em minúsculo (ignorando
+# maiúscula/minúscula), então nunca descarta um alias que só falharia depois
+# por causa da exigência de Title Case -- só descarta quando a palavra nem
+# parecida está no parágrafo.
+#
+# Premissa registrada: a presença de uma palavra é comparada em `str.lower()`,
+# enquanto `_exact_match` usa `re.IGNORECASE`. Os dois divergem só em
+# caracteres Unicode exóticos (ex.: 'ſ' casa com 's' no IGNORECASE mas não no
+# lower()), que não ocorrem em texto jornalístico PT-BR nem em nomes vindos do
+# TSE. `_fuzzy_match_score` já assumia o mesmo (compara em `.lower()`).
+
+
+@dataclass(frozen=True)
+class _PreparedAlias:
+    alias: str
+    # Índices, no vocabulário, das palavras que `_fuzzy_match_score` compara
+    # (ou seja, `alias.split()` em minúsculo).
+    fuzzy_word_ids: tuple[int, ...]
+    # Idem para as palavras `\w+` do alias, que é o que `_exact_match` exige.
+    # Fica None quando as duas tokenizações coincidem (caso da esmagadora
+    # maioria dos aliases, que só têm letras e espaços) -- aí um teste só
+    # basta. Difere em aliases com pontuação interna, ex.: "Jean-Pierre",
+    # onde `split()` dá ["jean-pierre"] e `\w+` dá ["jean", "pierre"].
+    exact_word_ids: tuple[int, ...] | None
+
+
+@dataclass(frozen=True)
+class _AliasIndex:
+    vocabulary: tuple[str, ...]
+    per_entity: tuple[tuple[Entity, tuple[_PreparedAlias, ...]], ...]
+
+
+def _build_alias_index(entities: list[Entity]) -> _AliasIndex:
+    vocabulary: list[str] = []
+    vocabulary_ids: dict[str, int] = {}
+
+    def word_id(word: str) -> int:
+        existing = vocabulary_ids.get(word)
+        if existing is not None:
+            return existing
+        new_id = len(vocabulary)
+        vocabulary_ids[word] = new_id
+        vocabulary.append(word)
+        return new_id
+
+    per_entity: list[tuple[Entity, tuple[_PreparedAlias, ...]]] = []
+    for entity in entities:
+        prepared: list[_PreparedAlias] = []
+        for alias in entity.all_match_candidates():
+            fuzzy_words = tuple(word.lower() for word in alias.split())
+            exact_words = tuple(word.lower() for word in _WORD_RE.findall(alias))
+            prepared.append(
+                _PreparedAlias(
+                    alias=alias,
+                    fuzzy_word_ids=tuple(word_id(word) for word in fuzzy_words),
+                    exact_word_ids=(
+                        None if exact_words == fuzzy_words else tuple(word_id(word) for word in exact_words)
+                    ),
+                )
+            )
+        per_entity.append((entity, tuple(prepared)))
+
+    return _AliasIndex(vocabulary=tuple(vocabulary), per_entity=tuple(per_entity))
+
+
+# Cache de uma entrada só: em produção (`src/pipeline.py`) a mesma lista de
+# entidades é reusada para todos os parágrafos de todas as mensagens, então
+# uma entrada cobre 100% dos casos. A validação compara a lista atual contra
+# o snapshot guardado -- tupla de objetos idênticos, então a comparação cai no
+# atalho de identidade do CPython e custa um punhado de microssegundos, mas
+# protege contra a lista ter sido alterada entre chamadas.
+_cached_entities: tuple[Entity, ...] | None = None
+_cached_index: _AliasIndex | None = None
+
+
+def _alias_index_for(entities: list[Entity]) -> _AliasIndex:
+    global _cached_entities, _cached_index
+
+    snapshot = tuple(entities)
+    if _cached_index is not None and _cached_entities == snapshot:
+        return _cached_index
+
+    index = _build_alias_index(entities)
+    _cached_entities = snapshot
+    _cached_index = index
+    return index
+
+
+def reset_alias_index_cache() -> None:
+    """Descarta o índice de aliases em memória. A correção NÃO depende disso
+    (`_alias_index_for` revalida o cache a cada chamada) -- serve para liberar
+    memória depois de trocar a lista de entidades num processo longo, e para
+    isolar testes que medem o comportamento do próprio cache."""
+    global _cached_entities, _cached_index
+    _cached_entities = None
+    _cached_index = None
+
+
+def _candidate_word_hits(index: _AliasIndex, paragraph_words_lower: list[str], fuzzy_threshold: float) -> list[bool]:
+    """Para cada palavra do vocabulário de aliases, diz se alguma palavra do
+    parágrafo chega ao threshold contra ela. Uma passada por parágrafo,
+    reaproveitada por todos os aliases."""
+    if fuzzy_threshold <= 0.0:
+        # Threshold nulo aceita qualquer coisa: não há o que descartar.
+        return [True] * len(index.vocabulary)
+
+    # Clamp em 100: com threshold > 1.0 nenhum match fuzzy é possível (o score
+    # é 0-1), mas o exact match ainda precisa das palavras presentes na
+    # íntegra -- ratio 100. A margem de 1e-9 evita que ruído de ponto
+    # flutuante (`ratio / 100 >= t` aqui vs. `ratio >= t * 100` no rapidfuzz)
+    # descarte um candidato que ficaria exatamente em cima do threshold.
+    score_cutoff = min(fuzzy_threshold, 1.0) * 100.0 - 1e-9
+
+    hits = [False] * len(index.vocabulary)
+    for token in dict.fromkeys(paragraph_words_lower):
+        for _matched, _score, vocabulary_id in process.extract(
+            token, index.vocabulary, scorer=fuzz.ratio, score_cutoff=score_cutoff, limit=None
+        ):
+            hits[vocabulary_id] = True
+    return hits
+
+
+def _may_match(prepared: _PreparedAlias, hits: list[bool]) -> bool:
+    """False só quando o alias comprovadamente não pode casar de jeito nenhum
+    neste parágrafo. Em caso de dúvida devolve True e deixa
+    `_exact_match`/`_fuzzy_match_score` decidirem -- errar para o lado
+    permissivo custa tempo, errar para o lado restritivo perde match."""
+    for word_id in prepared.fuzzy_word_ids:
+        if not hits[word_id]:
+            break
+    else:
+        return True
+
+    exact_word_ids = prepared.exact_word_ids
+    if exact_word_ids is None:
+        return False
+    for word_id in exact_word_ids:
+        if not hits[word_id]:
+            return False
+    return True
+
+
 def match_entities(paragraph: str, entities: list[Entity], *, fuzzy_threshold: float) -> list[EntityMatch]:
     """Identifica quais entidades são mencionadas no parágrafo, via match
     exato (por palavra, case-insensitive) OU fuzzy (rapidfuzz, comparando
@@ -123,15 +310,33 @@ def match_entities(paragraph: str, entities: list[Entity], *, fuzzy_threshold: f
     lados, então "republicanos" ou "REPUBLICANOS" bateriam com score 1.0
     ali mesmo com o exact match bloqueado -- reabriria exatamente o mesmo
     falso positivo que o Title Case exigido no exact match existe pra
-    evitar."""
+    evitar.
+
+    Aliases sem nenhuma chance de casar são descartados antes de pagar o
+    custo de regex/fuzzy -- ver o bloco "Pré-filtro de candidatos" acima.
+    É só performance: o conjunto de matches devolvido é o mesmo de antes."""
+    index = _alias_index_for(entities)
+    paragraph_words_lower = [word.lower() for word in _WORD_RE.findall(paragraph)]
+    hits = _candidate_word_hits(index, paragraph_words_lower, fuzzy_threshold)
+
     matches: list[EntityMatch] = []
 
-    for entity in entities:
+    for entity, prepared_aliases in index.per_entity:
         best: EntityMatch | None = None
 
-        for alias in entity.all_match_candidates():
+        for prepared in prepared_aliases:
+            if not _may_match(prepared, hits):
+                continue
+
+            alias = prepared.alias
             if _exact_match(alias, paragraph):
-                best = EntityMatch(entity_id=entity.id, match_type="exact", score=1.0, matched_alias=alias)
+                best = EntityMatch(
+                    entity_id=entity.id,
+                    entity_type=entity.entity_type,
+                    match_type="exact",
+                    score=1.0,
+                    matched_alias=alias,
+                )
                 break  # exato já é o melhor resultado possível -- não precisa continuar
 
             if alias.upper() in _CASE_SENSITIVE_ALIASES:
@@ -139,7 +344,13 @@ def match_entities(paragraph: str, entities: list[Entity], *, fuzzy_threshold: f
 
             fuzzy_score = _fuzzy_match_score(alias, paragraph)
             if fuzzy_score >= fuzzy_threshold and (best is None or fuzzy_score > best.score):
-                best = EntityMatch(entity_id=entity.id, match_type="fuzzy", score=fuzzy_score, matched_alias=alias)
+                best = EntityMatch(
+                    entity_id=entity.id,
+                    entity_type=entity.entity_type,
+                    match_type="fuzzy",
+                    score=fuzzy_score,
+                    matched_alias=alias,
+                )
 
         if best is not None:
             matches.append(best)

@@ -5,11 +5,33 @@ por artigo -- `run_pipeline` em src/pipeline.py chama `match_entities` uma
 vez por parágrafo segmentado, então o custo multiplica pelo número de
 parágrafos de cada notícia).
 
-Este script NÃO se conecta a banco nenhum e NÃO lê a tabela real
-`entidade_matching` (ainda sem acesso programático). As ~1.400 entidades são
-sintéticas, geradas em memória com seed fixa (reprodutível) -- só precisamos
-do volume/formato (`Entity` com canonical_name de 2-4 palavras, 1-2 aliases,
-mistura de entity_type político/partido), não dos nomes reais do TSE.
+Cenários medidos:
+
+1. 10 entidades de `config/entities.yaml` (baseline pré-migração, sem banco).
+2. ~1.393 entidades SINTÉTICAS, geradas em memória com seed fixa
+   (reprodutível) -- só o volume/formato (`Entity` com canonical_name de
+   2-4 palavras, 1-2 aliases, mistura político/partido) importa aqui, não
+   os nomes reais do TSE. Não depende de banco.
+3. Entidades REAIS, escopo v1 (o que roda em produção hoje): só
+   presidente/vice-presidente e os partidos deles, via
+   `entities_store.load_active_entities_from_db` (~40 entidades). Requer
+   conexão de LEITURA com `app_db2` (mesmas credenciais de `.env` usadas
+   por `src/main.py`/`tests/test_entities_store.py`).
+4. Entidades REAIS, escopo completo: TODAS as ~1.393 entidades
+   `ativo = true` de `entidade_matching`, sem filtro de cargo --
+   `load_active_entities_from_db` não tem um jeito de pedir "todos os
+   cargos" (a assinatura exige uma lista), então este script faz um SELECT
+   direto (`entities_from_entidade_matching_rows`/
+   `load_real_entities_full_scope`, abaixo) só para fins de benchmark, sem
+   alterar `src/entities_store.py`. Também requer `app_db2`.
+
+Os cenários 3 e 4 existem para confirmar (ou refutar) que o ganho medido
+com vocabulário sintético (pré-filtro + índice de aliases + cache de regex,
+ver `src/entity_matcher.py`) se sustenta com nomes reais do TSE
+(acentuação, nomes compostos, siglas curtas de partido) -- vocabulário mais
+diverso pode mudar a taxa de colisão do pré-filtro. Se `app_db2` estiver
+inacessível, esses dois cenários são pulados com um aviso -- o script
+continua rodando os cenários 1 e 2 normalmente.
 
 Os parágrafos usados no benchmark SÃO reais: vêm de
 data/raw/articles_202608191040.csv, segmentados via src/segmentation.py
@@ -19,8 +41,10 @@ realista.
 Uso:
     .venv/bin/python scripts/benchmark_entity_matcher.py
 
-Não modifica nenhum arquivo de produção -- é só medição. Ver conclusão e
-recomendação no final da saída.
+Não modifica nenhum arquivo de produção -- é só medição. Os cenários 3/4
+fazem só `SELECT` em `app_db2` (nunca `INSERT`/`UPDATE`/`DELETE`), com
+`rollback()` defensivo no fim, mesmo padrão de `tests/test_entities_store.py`.
+Ver conclusão e recomendação no final da saída.
 """
 from __future__ import annotations
 
@@ -36,18 +60,27 @@ SRC_DIR = BASE_DIR / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
+import entities_store  # noqa: E402
 import segmentation  # noqa: E402  (precisa do sys.path acima)
+import storage  # noqa: E402
 from entities_store import Entity, load_and_validate  # noqa: E402
 from entity_matcher import match_entities  # noqa: E402
 
 ARTICLES_CSV = BASE_DIR / "data" / "raw" / "articles_202608191040.csv"
 REAL_ENTITIES_YAML = BASE_DIR / "config" / "entities.yaml"
+ENV_PATH = BASE_DIR / ".env"
 
 FUZZY_THRESHOLD = 0.85  # mesmo valor de config/settings.yaml -- ver docstring do módulo
 
 # Volume alvo da migração: 1.363 políticos + 30 partidos = 1.393 entidades.
 N_POLITICIANS = 1_363
 N_PARTIES = 30
+
+# Mesma lista de config/settings.yaml (entity_scope.cargos) -- duplicada aqui
+# de propósito, mesmo raciocínio do comentário equivalente em
+# tests/test_entities_store.py: este benchmark mede o recorte v1 tal como
+# ele é hoje, não o que o YAML disser no futuro.
+CARGOS_V1 = ["PRESIDENTE", "VICE-PRESIDENTE"]
 
 N_REAL_PARAGRAPHS = 25  # quantidade de parágrafos reais usados no benchmark
 N_REPEATS_PER_PARAGRAPH = 5  # repetições por parágrafo, pra reduzir ruído de medição
@@ -163,6 +196,104 @@ def generate_synthetic_entities(n_politicians: int, n_parties: int, *, seed: int
 
 
 # ---------------------------------------------------------------------------
+# Carga de entidades REAIS via app_db2 (entidade_matching)
+# ---------------------------------------------------------------------------
+
+
+def entities_from_entidade_matching_rows(
+    rows: list[tuple[str, str | None, str | None, str, list[str] | None]],
+) -> list[Entity]:
+    """Mapeia linhas de `entidade_matching` (entity_type,
+    nr_titulo_eleitoral_candidato, nr_partido, nome_principal, aliases) para
+    `Entity` -- MESMA regra de `entities_store.load_active_entities_from_db`
+    (id = nr_titulo quando `entity_type='politico'`, nr_partido quando
+    `entity_type='partido'`; levanta `ValueError` para entity_type
+    inesperado ou chave ausente). Extraída à parte pra dar pra testar sem
+    banco (linhas sintéticas, ver tests/test_benchmark_entity_matcher.py) e
+    pra ser reusada por `load_real_entities_full_scope` abaixo, sem duplicar
+    a regra de mapeamento."""
+    entities: list[Entity] = []
+    for entity_type, nr_titulo, nr_partido, nome_principal, aliases in rows:
+        if entity_type not in entities_store.DB_ENTITY_TYPES:
+            raise ValueError(
+                f"entidade_matching: entity_type {entity_type!r} inesperado para "
+                f"{nome_principal!r} (esperado um de {sorted(entities_store.DB_ENTITY_TYPES)})"
+            )
+
+        entity_id = nr_titulo if entity_type == "politico" else nr_partido
+        if not entity_id:
+            raise ValueError(
+                f"entidade_matching: entidade {nome_principal!r} (entity_type={entity_type!r}) "
+                "sem chave preenchida (nr_titulo_eleitoral_candidato/nr_partido nulo ou vazio)"
+            )
+
+        entities.append(
+            Entity(
+                id=str(entity_id),
+                canonical_name=nome_principal,
+                entity_type=entity_type,
+                aliases=tuple(aliases or []),
+            )
+        )
+
+    return entities
+
+
+def load_real_entities_full_scope(conn) -> list[Entity]:
+    """Carrega TODAS as entidades `ativo = true` de `entidade_matching`, sem
+    o filtro de cargo da v1 -- `entities_store.load_active_entities_from_db`
+    exige uma lista de cargos e não tem um jeito de pedir "todos os cargos"
+    (ver docstring dela). Query direta feita SÓ para fins deste benchmark
+    (medir o volume máximo já visto no banco, ~1.393 entidades), sem alterar
+    `src/entities_store.py` nem nenhum outro código de produção. Só leitura
+    (`SELECT`) -- nunca escreve."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT entity_type, nr_titulo_eleitoral_candidato, nr_partido,
+                   nome_principal, aliases
+            FROM entidade_matching
+            WHERE ativo = true
+            """
+        )
+        rows = cur.fetchall()
+
+    return entities_from_entidade_matching_rows(rows)
+
+
+def load_real_db_scenarios() -> list[tuple[str, list[Entity]]] | None:
+    """Conecta a `app_db2` (credenciais de `.env`, mesmas de `src/main.py`)
+    e carrega os dois cenários reais: escopo v1 (produção hoje) e escopo
+    completo (volume máximo já visto no banco). Devolve `None` (em vez de
+    propagar a exceção) se a conexão falhar -- este benchmark também precisa
+    rodar sem rede até `app_db2` (ver histórico de indisponibilidade em
+    data/annotation/pendencias-tecnicas.md), só que sem os cenários reais.
+    Conexão fechada com `rollback()` defensivo antes do `close()`, mesmo
+    padrão de `tests/test_entities_store.py` -- só fazemos `SELECT` aqui."""
+    from dotenv import load_dotenv
+
+    load_dotenv(ENV_PATH)
+
+    try:
+        conn = storage.get_connection()
+    except Exception as exc:  # noqa: BLE001 -- benchmark, não produção: qualquer falha de conexão só vira aviso
+        print(f"  AVISO: não deu pra conectar a app_db2 ({exc}) -- pulando cenários reais.")
+        return None
+
+    try:
+        v1_entities = entities_store.load_active_entities_from_db(conn, CARGOS_V1)
+        full_entities = load_real_entities_full_scope(conn)
+    finally:
+        conn.rollback()
+        conn.close()
+
+    return [
+        (f"{len(v1_entities)} entidades REAIS -- escopo v1 (presidente/vice + partidos, produção hoje)", v1_entities),
+        (f"{len(full_entities)} entidades REAIS -- escopo completo (entidade_matching, ativo=true)", full_entities),
+    ]
+
+
+# ---------------------------------------------------------------------------
 # Carga de parágrafos reais (dado real, formato/volume realista)
 # ---------------------------------------------------------------------------
 
@@ -249,8 +380,8 @@ def format_ms(seconds: float) -> str:
 
 def main() -> None:
     print("=" * 78)
-    print("Benchmark: entity_matcher.match_entities -- 10 entidades (atual) vs.")
-    print("~1.393 entidades sintéticas (volume da migração pra entidade_matching)")
+    print("Benchmark: entity_matcher.match_entities -- 10 entidades (YAML antigo) vs.")
+    print("~1.393 sintéticas vs. REAIS de entidade_matching (escopo v1 e completo)")
     print("=" * 78)
 
     print(f"\nCarregando entidades reais de {REAL_ENTITIES_YAML} ...")
@@ -267,20 +398,46 @@ def main() -> None:
     print(f"  -> {len(paragraphs)} parágrafos (tamanho em chars: min={min(lengths)}, "
           f"mediana={int(statistics.median(lengths))}, max={max(lengths)})")
 
+    print("\nConectando a app_db2 para carregar entidades REAIS (entidade_matching) ...")
+    real_db_scenarios = load_real_db_scenarios()
+    if real_db_scenarios is not None:
+        for label, entities in real_db_scenarios:
+            print(f"  -> {label}")
+
     print(f"\nMedindo ({N_REPEATS_PER_PARAGRAPH} repetições por parágrafo, threshold={FUZZY_THRESHOLD}) ...")
     baseline = benchmark_scenario("10 entidades (config/entities.yaml atual)", paragraphs, real_entities)
     synthetic = benchmark_scenario(f"{len(synthetic_entities)} entidades sintéticas (volume-alvo)", paragraphs, synthetic_entities)
 
+    all_results = [baseline, synthetic]
+    real_v1 = real_full = None
+    if real_db_scenarios is not None:
+        (v1_label, v1_entities), (full_label, full_entities) = real_db_scenarios
+        real_v1 = benchmark_scenario(v1_label, paragraphs, v1_entities)
+        real_full = benchmark_scenario(full_label, paragraphs, full_entities)
+        all_results.extend([real_v1, real_full])
+
     print("\n" + "-" * 78)
     print("RESULTADOS POR PARÁGRAFO")
     print("-" * 78)
-    for result in (baseline, synthetic):
+    for result in all_results:
         print(f"\n{result.label} ({result.n_entities} entidades):")
         print(f"  média:   {format_ms(result.mean)}")
         print(f"  mediana: {format_ms(result.median)}")
         print(f"  p95:     {format_ms(result.p95)}")
         print(f"  min:     {format_ms(min(result.per_paragraph_seconds))}")
         print(f"  max:     {format_ms(max(result.per_paragraph_seconds))}")
+
+    if real_full is not None:
+        print("\n" + "-" * 78)
+        print("COMPARAÇÃO: SINTÉTICO vs. REAL (volume completo, ~mesma ordem de grandeza)")
+        print("-" * 78)
+        print(f"  sintético ({synthetic.n_entities} entidades):        {format_ms(synthetic.mean)}/parágrafo (média)")
+        print(f"  real completo ({real_full.n_entities} entidades):    {format_ms(real_full.mean)}/parágrafo (média)")
+        real_vs_synthetic = real_full.mean / synthetic.mean if synthetic.mean > 0 else float("inf")
+        print(f"  razão real/sintético: {real_vs_synthetic:.2f}x "
+              f"({'real mais lento' if real_vs_synthetic > 1 else 'real mais rápido ou igual'})")
+    if real_v1 is not None:
+        print(f"\n  real escopo v1 ({real_v1.n_entities} entidades, produção hoje): {format_ms(real_v1.mean)}/parágrafo (média)")
 
     slowdown = synthetic.mean / baseline.mean if baseline.mean > 0 else float("inf")
     print(f"\nFator de desaceleração (média, {synthetic.n_entities} vs. {baseline.n_entities} entidades): {slowdown:.1f}x")
@@ -295,6 +452,12 @@ def main() -> None:
     synthetic_article = synthetic.mean * AVG_PARAGRAPHS_PER_ARTICLE
     print(f"  com 10 entidades:    {format_ms(baseline_article)} de matching por artigo")
     print(f"  com {synthetic.n_entities} entidades: {format_ms(synthetic_article)} de matching por artigo")
+    if real_v1 is not None:
+        real_v1_article = real_v1.mean * AVG_PARAGRAPHS_PER_ARTICLE
+        print(f"  com {real_v1.n_entities} entidades REAIS (escopo v1, produção hoje): {format_ms(real_v1_article)} de matching por artigo")
+    if real_full is not None:
+        real_full_article = real_full.mean * AVG_PARAGRAPHS_PER_ARTICLE
+        print(f"  com {real_full.n_entities} entidades REAIS (escopo completo):        {format_ms(real_full_article)} de matching por artigo")
 
     # --- Estimativa de throughput -------------------------------------
     print("\n" + "-" * 78)

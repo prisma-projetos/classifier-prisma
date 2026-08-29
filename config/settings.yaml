@@ -4,6 +4,20 @@ entity_matching:
   # Ver src/entity_matcher.py e classifier-prisma/context.md, seção 3.1.
   fuzzy_threshold: 0.85
 
+entity_scope:
+  # Decisão de fase (equipe, 2026-08-28) -- ver
+  # data/annotation/pendencias-tecnicas.md, seção "Mudança de escopo do
+  # projeto (2026-08-28)". NÃO é limitação técnica: a v1 do classifier só
+  # processa candidatos a presidente/vice-presidente (e os partidos deles),
+  # não o universo inteiro de `entidade_matching`. Quando a v2 ampliar o
+  # escopo (hipótese registrada: governador+vice+senador), atualizar esta
+  # lista com os valores de `tabela_candidatura.ds_cargo`/
+  # `entidade_matching.ds_cargo` correspondentes -- ver
+  # `entities_store.load_active_entities_from_db`.
+  cargos:
+    - "PRESIDENTE"
+    - "VICE-PRESIDENTE"
+
 model:
   # Identificação do modelo/versão gravada em cada classification_run --
   # ver README sobre esta ser uma baseline léxico/regra (v1), não um modelo

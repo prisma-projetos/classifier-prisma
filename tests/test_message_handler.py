@@ -5,9 +5,9 @@ import re
 
 import pytest
 
-import classification_store
-import entities_store
 import message_handler
+import notifications_store
+from analyser_notifier import build_notification_payload
 from entities_store import Entity
 from lexicon import Lexicon
 
@@ -15,7 +15,15 @@ from lexicon import Lexicon
 # menos uma classificação real (não vazia) -- mesmo padrão inline usado em
 # tests/test_entity_matcher.py, sem depender de config/entities.yaml ou
 # config/lexicon.yaml reais.
-LULA = Entity(id="lula", canonical_name="Luiz Inácio Lula da Silva", entity_type="politician", aliases=("Lula",))
+#
+# `id` aqui já é a chave do schema NOVO (`nr_titulo_eleitoral_candidato`,
+# sempre string) -- diferente do slug artificial ("lula") usado antes da
+# migração para `entidade_matching`. Precisa existir uma linha
+# correspondente em `tabela_politico` (ver `_seed_politico` abaixo) por
+# causa da foreign key de `tabela_classificacao`.
+LULA = Entity(
+    id="111222333444", canonical_name="Luiz Inácio Lula da Silva", entity_type="politico", aliases=("Lula",)
+)
 ENTITIES = [LULA]
 
 LEXICON = Lexicon(
@@ -35,6 +43,32 @@ DEFAULT_FULL_TEXT = (
     "O presidente Lula aprovou nesta semana uma nova medida econômica que promete "
     "impactar diretamente o orçamento federal para o próximo ano."
 )
+
+# Parágrafo que não menciona nenhuma entidade conhecida -- usado para provar
+# o caso "zero classificações" (ver
+# test_article_without_entity_match_generates_no_row_and_keeps_being_reprocessed).
+NO_ENTITY_FULL_TEXT = (
+    "O ministério anunciou nesta semana uma medida econômica que promete impactar "
+    "diretamente o orçamento federal para o próximo ano, sem citar nomes."
+)
+
+
+def _seed_politico(conn, nr_titulo: str, nome: str = "Luiz Inácio Lula da Silva") -> None:
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO tabela_politico (nr_titulo_eleitoral_candidato, nm_candidato) VALUES (%s, %s) "
+            "ON CONFLICT (nr_titulo_eleitoral_candidato) DO NOTHING",
+            (nr_titulo, nome),
+        )
+    conn.commit()
+
+
+def _seed_midia(conn, nome_midia: str) -> int:
+    with conn.cursor() as cur:
+        cur.execute("INSERT INTO tabela_midia (nome_midia) VALUES (%s) RETURNING id_midia", (nome_midia,))
+        (id_midia,) = cur.fetchone()
+    conn.commit()
+    return id_midia
 
 
 def _build_payload_bytes(**overrides) -> bytes:
@@ -74,89 +108,157 @@ def _handle(conn, raw_body: bytes) -> message_handler.HandleResult:
     )
 
 
-def test_redelivery_of_same_message_is_ignored_by_precheck(db_conn):
+def _fetch_outbox_row(conn):
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT id_artigo_scrape, pipeline_version, payload, status, attempts FROM classifier_analyser_outbox"
+        )
+        return cur.fetchone()
+
+
+def test_full_flow_persists_in_tabela_classificacao_and_enqueues_outbox_notification(db_conn):
+    # Cenário feliz ponta a ponta com o outbox (ADR 0004): pipeline roda,
+    # linha é gravada em tabela_classificacao (id_midia resolvido via lookup
+    # em tabela_midia), e uma notificação PENDENTE é enfileirada em
+    # classifier_analyser_outbox -- na mesma transação, não publicada
+    # diretamente no RabbitMQ (isso é responsabilidade de um processo
+    # separado, ver tests/test_notification_publisher.py).
+    _seed_politico(db_conn, LULA.id)
+    id_midia_esperado = _seed_midia(db_conn, "Portal Exemplo")
+
+    raw_body = _build_payload_bytes(article_id=101, pipeline_version="v1")
+
+    result = _handle(db_conn, raw_body)
+
+    assert result == message_handler.HandleResult(rows_inserted=1, already_processed=False)
+    assert _count(db_conn, "tabela_classificacao") == 1
+
+    with db_conn.cursor() as cur:
+        cur.execute(
+            "SELECT nr_titulo_eleitoral_candidato, nr_partido, id_midia, classificacao_sentimento, "
+            "metodo_classificacao, pipeline_version FROM tabela_classificacao"
+        )
+        row = cur.fetchone()
+    assert row == (LULA.id, None, id_midia_esperado, "positivo", "lexicon-baseline-v1", "v1")
+
+    assert _count(db_conn, "classifier_analyser_outbox") == 1
+    id_artigo_scrape, pipeline_version, payload, status, attempts = _fetch_outbox_row(db_conn)
+    assert id_artigo_scrape == 101
+    assert pipeline_version == "v1"
+    assert status == "pending"
+    assert attempts == 0
+    assert payload["article_id"] == 101
+    assert len(payload["classificacoes"]) == 1
+    assert payload["classificacoes"][0]["entity_id"] == LULA.id
+
+
+def test_redelivery_of_same_message_is_ignored_by_precheck_and_not_reenqueued(db_conn):
     # Cenário obrigatório (context.md, seção 10): reentrega da MESMA
-    # mensagem (mesmo article_id + pipeline_version) não pode duplicar nada.
-    # Aqui a segunda chamada é pega pela checagem prévia
-    # (classification_store.already_processed), antes de rodar o pipeline
-    # de novo à toa.
-    entities_store.sync_entities(db_conn, ENTITIES)
-    db_conn.commit()
+    # mensagem (mesmo article_id + pipeline_version) não pode duplicar linha
+    # em tabela_classificacao nem enfileirar notificação duplicada no
+    # outbox.
+    _seed_politico(db_conn, LULA.id)
 
     raw_body = _build_payload_bytes(article_id=101, pipeline_version="v1")
 
     first = _handle(db_conn, raw_body)
-    assert first.already_processed is False
-    assert first.run_id is not None
-    assert _count(db_conn, "classification_runs") == 1
-    assert _count(db_conn, "classifications") == 1
-    assert _count(db_conn, "analyser_notifications") == 1
+    assert first == message_handler.HandleResult(rows_inserted=1, already_processed=False)
+    assert _count(db_conn, "tabela_classificacao") == 1
+    assert _count(db_conn, "classifier_analyser_outbox") == 1
 
     second = _handle(db_conn, raw_body)
-    assert second == message_handler.HandleResult(run_id=None, already_processed=True)
+    assert second == message_handler.HandleResult(rows_inserted=0, already_processed=True)
 
-    # Nenhuma duplicata em nenhuma das três tabelas envolvidas na transação
-    # de persistência.
-    assert _count(db_conn, "classification_runs") == 1
-    assert _count(db_conn, "classifications") == 1
-    assert _count(db_conn, "analyser_notifications") == 1
+    # Pega pela checagem prévia (has_existing_classification) -- nem chega a
+    # rodar o pipeline de novo, então não enfileira de novo.
+    assert _count(db_conn, "tabela_classificacao") == 1
+    assert _count(db_conn, "classifier_analyser_outbox") == 1
 
 
-def test_unique_constraint_race_is_handled_as_idempotent_not_as_error(db_conn, monkeypatch):
-    # Cenário de corrida documentado no comentário de
-    # classification_store.persist_classification_result: duas entregas
-    # concorrentes do mesmo job passam pela checagem prévia (nenhuma via' a
-    # outra ainda), e é a constraint UNIQUE (article_id, pipeline_version)
-    # em classification_runs quem evita a duplicata de verdade.
-    #
-    # Para reproduzir isso de forma determinística (sem threads reais):
-    # 1. insere manualmente uma linha "concorrente" já commitada para o
-    #    mesmo (article_id, pipeline_version) do payload;
-    # 2. força handle_message a pular a checagem prévia via monkeypatch,
-    #    simulando a janela de corrida em que already_processed() ainda não
-    #    tinha visto essa linha quando foi consultado.
-    # Isso garante que o INSERT dentro de persist_classification_result vai
-    # de fato colidir com a constraint e produzir uma UniqueViolation real.
-    entities_store.sync_entities(db_conn, ENTITIES)
-    db_conn.commit()
-
-    article_id = 555
-    pipeline_version = "v1"
-
-    with db_conn.cursor() as cur:
-        cur.execute(
-            """
-            INSERT INTO classification_runs (
-                job_id, article_id, pipeline_version, content_type,
-                model_name, model_version, entity_match_threshold
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s)
-            """,
-            (999_001, article_id, pipeline_version, "news_article", MODEL_NAME, MODEL_VERSION, FUZZY_THRESHOLD),
-        )
-    db_conn.commit()
-
-    monkeypatch.setattr(classification_store, "already_processed", lambda *args, **kwargs: False)
-
-    raw_body = _build_payload_bytes(job_id=42, article_id=article_id, pipeline_version=pipeline_version)
+def test_no_media_match_leaves_id_midia_null_without_blocking_processing(db_conn):
+    # source_name sem correspondência em tabela_midia -> id_midia NULL, mas
+    # a mensagem é processada normalmente (ver classification_store.resolve_id_midia).
+    _seed_politico(db_conn, LULA.id)
+    raw_body = _build_payload_bytes(source_name="Veículo Desconhecido Que Não Está Cadastrado")
 
     result = _handle(db_conn, raw_body)
 
-    # Não propaga UniqueViolation -- vira sucesso idempotente.
-    assert result == message_handler.HandleResult(run_id=None, already_processed=True)
+    assert result.rows_inserted == 1
+    with db_conn.cursor() as cur:
+        cur.execute("SELECT id_midia FROM tabela_classificacao")
+        (id_midia,) = cur.fetchone()
+    assert id_midia is None
 
-    # Só a linha concorrente pré-existente continua lá; nada foi duplicado
-    # nem meio-gravado (a transação de persist_classification_result foi
-    # revertida inteira pela exceção).
-    assert _count(db_conn, "classification_runs") == 1
-    assert _count(db_conn, "classifications") == 0
-    assert _count(db_conn, "analyser_notifications") == 0
+
+def test_media_lookup_is_case_insensitive(db_conn):
+    _seed_politico(db_conn, LULA.id)
+    id_midia_esperado = _seed_midia(db_conn, "Portal Exemplo")
+    raw_body = _build_payload_bytes(source_name="PORTAL EXEMPLO")
+
+    _handle(db_conn, raw_body)
+
+    with db_conn.cursor() as cur:
+        cur.execute("SELECT id_midia FROM tabela_classificacao")
+        (id_midia,) = cur.fetchone()
+    assert id_midia == id_midia_esperado
+
+
+def test_outbox_write_failure_after_persisting_classification_rolls_back_everything(monkeypatch, db_conn):
+    # Prova a garantia central do outbox (ADR 0004): resultado e notificação
+    # pendente são gravados na MESMA transação. Aqui simulamos uma falha
+    # DEPOIS do INSERT em tabela_classificacao (já executado dentro da
+    # transação em aberto) e DEPOIS do próprio INSERT no outbox, mas ANTES
+    # do commit final -- e confirmamos que NADA fica persistido em nenhuma
+    # das duas tabelas. Sem essa garantia, poderíamos ter um resultado
+    # persistido sem nunca notificar o Analyser -- exatamente o risco que
+    # motivou esta mudança (ver ADR 0003, risco aceito e agora mitigado).
+    _seed_politico(db_conn, LULA.id)
+    raw_body = _build_payload_bytes()
+
+    real_enqueue = notifications_store.enqueue_notification
+
+    def _enqueue_then_fail(conn, **kwargs):
+        real_enqueue(conn, **kwargs)
+        raise RuntimeError("falha simulada entre a gravação do outbox e o commit")
+
+    monkeypatch.setattr(notifications_store, "enqueue_notification", _enqueue_then_fail)
+
+    with pytest.raises(RuntimeError):
+        _handle(db_conn, raw_body)
+
+    # Ninguém chamou commit() antes da exceção -- desfaz explicitamente para
+    # a asserção refletir o estado real que outro processo (ex.: `src/main.py`
+    # fechando a conexão) encontraria: nada commitado.
+    db_conn.rollback()
+
+    assert _count(db_conn, "tabela_classificacao") == 0
+    assert _count(db_conn, "classifier_analyser_outbox") == 0
+
+
+def test_article_without_entity_match_generates_no_row_and_keeps_being_reprocessed(db_conn):
+    # Limitação conhecida e documentada (ver docstring de
+    # classification_store.has_existing_classification): sem "run" no
+    # schema novo, um artigo sem NENHUMA entidade identificada nunca grava
+    # linha em tabela_classificacao -- logo a checagem prévia nunca vai
+    # encontrar nada para ele, e ele é reprocessado a cada redelivery. Não é
+    # regressão: não há duplicação de dado (não há dado nenhum), só
+    # reprocessamento redundante e barato.
+    raw_body = _build_payload_bytes(full_text=NO_ENTITY_FULL_TEXT)
+
+    first = _handle(db_conn, raw_body)
+    second = _handle(db_conn, raw_body)
+
+    assert first == message_handler.HandleResult(rows_inserted=0, already_processed=False)
+    assert second == message_handler.HandleResult(rows_inserted=0, already_processed=False)
+    assert _count(db_conn, "tabela_classificacao") == 0
+    assert _count(db_conn, "classifier_analyser_outbox") == 0
 
 
 def test_malformed_json_is_rejected_without_side_effects(db_conn):
     with pytest.raises(message_handler.RejectedMessage):
         _handle(db_conn, b"{isso nao e json valido")
 
-    assert _count(db_conn, "classification_runs") == 0
+    assert _count(db_conn, "tabela_classificacao") == 0
 
 
 def test_payload_missing_required_field_is_rejected_without_side_effects(db_conn):
@@ -167,4 +269,24 @@ def test_payload_missing_required_field_is_rejected_without_side_effects(db_conn
     with pytest.raises(message_handler.RejectedMessage):
         _handle(db_conn, raw_body)
 
-    assert _count(db_conn, "classification_runs") == 0
+    assert _count(db_conn, "tabela_classificacao") == 0
+
+
+def test_build_notification_payload_uses_only_fields_tabela_classificacao_has(db_conn):
+    # Teste de contrato leve: garante que o payload de notificação não
+    # inventa campo -- só o que já está disponível a partir do payload do
+    # scraper e do resultado do pipeline (ver PENDÊNCIA sobre validação
+    # deste formato com o time do Analyser, docs/adr/0003).
+    import pipeline
+    from payload import parse_payload
+
+    parsed = parse_payload(_build_payload_bytes(article_id=999))
+    classifications = pipeline.run_pipeline(parsed, ENTITIES, LEXICON, fuzzy_threshold=FUZZY_THRESHOLD)
+
+    notification = build_notification_payload(parsed, classifications)
+
+    assert notification["article_id"] == 999
+    assert notification["schema_version"] == 1
+    assert notification["classificacoes"][0]["entity_id"] == LULA.id
+    assert notification["classificacoes"][0]["entity_type"] == "politico"
+    assert "evidence_text" not in notification["classificacoes"][0]

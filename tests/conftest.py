@@ -73,7 +73,9 @@ def db_conn():
     conn = connect_to(os.environ["POSTGRES_TEST_DB"])
     with conn.cursor() as cur:
         cur.execute(
-            "TRUNCATE TABLE analyser_notifications, classifications, classification_runs, political_entities RESTART IDENTITY CASCADE"
+            "TRUNCATE TABLE analyser_notifications, classifications, classification_runs, political_entities, "
+            "tabela_classificacao, tabela_politico, tabela_partido, tabela_midia, classifier_analyser_outbox "
+            "RESTART IDENTITY CASCADE"
         )
     conn.commit()
     try:

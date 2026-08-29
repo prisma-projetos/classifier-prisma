@@ -10,9 +10,16 @@ from pika.exceptions import AMQPError, NackError, UnroutableError
 # NENHUM destes nomes foi confirmado com o DevOps ainda (diferente da fila
 # de consumo do Scraper, essa sim já fechada -- ver src/rabbitmq_consumer.py
 # e o README, seção "RabbitMQ de consumo"). São placeholders razoáveis para
-# poder desenvolver e testar o padrão outbox agora -- não assumir que estão
-# corretos em produção sem confirmar antes (ver classifier-prisma/context.md,
-# seção 3.1 e 9).
+# poder desenvolver e testar agora -- não assumir que estão corretos em
+# produção sem confirmar antes (ver classifier-prisma/context.md, seção 3.1
+# e 9).
+#
+# Este wrapper foi construído originalmente para o outbox descrito na ADR
+# 0002 (`src/notify_analyser.py`, hoje órfão -- ver ADR 0003). Desde
+# 2026-08-28 é reaproveitado por `src/analyser_notifier.py` para publicação
+# SÍNCRONA (logo após persistir e comitar em `tabela_classificacao`, ver
+# `src/message_handler.py`) -- a infraestrutura de conexão/publicação em si
+# não mudou, só quem chama e quando.
 DEFAULT_QUEUE = "classifier.notificacoes.queue"
 DEFAULT_EXCHANGE = "classifier.saida.exchange"
 DEFAULT_EXCHANGE_TYPE = "direct"

@@ -21,6 +21,7 @@ class ClassificationResult:
     paragraph_index: int
     evidence_text: str
     entity_id: str
+    entity_type: str  # 'politico' | 'partido' (propagado de EntityMatch.entity_type)
     category: str
     confidence: float
     entity_match_type: str
@@ -67,6 +68,7 @@ def run_pipeline(
                     paragraph_index=index,
                     evidence_text=paragraph,
                     entity_id=match.entity_id,
+                    entity_type=match.entity_type,
                     category=lexicon_result.category,
                     confidence=lexicon_result.confidence,
                     entity_match_type=match.match_type,

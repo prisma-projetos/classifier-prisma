@@ -14,7 +14,11 @@ from lexicon import load_lexicon
 from rabbitmq_consumer import ConsumerConfig, run_consumer
 
 BASE_DIR = Path(__file__).resolve().parent.parent
-ENTITIES_PATH = BASE_DIR / "config" / "entities.yaml"
+# `config/entities.yaml` não é mais a fonte usada em produção -- entidades
+# vêm de `entidade_matching` (ver `entities_store.load_active_entities_from_db`
+# abaixo). O YAML continua existindo só para os scripts de
+# benchmark/anotação (scripts/benchmark_entity_matcher.py,
+# scripts/build_annotation_batches.py), que apontam pro próprio caminho.
 LEXICON_PATH = BASE_DIR / "config" / "lexicon.yaml"
 SETTINGS_PATH = BASE_DIR / "config" / "settings.yaml"
 
@@ -48,22 +52,36 @@ def main() -> int:
 
     conn = storage.get_connection()
     try:
-        applied = storage.run_migrations(conn)
-        if applied:
-            logger.info("Migrations aplicadas nesta execução: %s", ", ".join(applied))
+        # NÃO chamar storage.run_migrations(conn) aqui. `.env` agora aponta
+        # `POSTGRES_HOST`/`POSTGRES_PORT`/`POSTGRES_DB` direto para `app_db2`
+        # -- o System DB COMPARTILHADO definitivo da plataforma Prisma
+        # (Analyser, frontend etc. também vão usar), gerenciado por outra
+        # pessoa da equipe via DBeaver, não por este repositório. As
+        # migrations em db/migrations/ são do schema ANTIGO do Classifier
+        # (political_entities, classification_runs, classifications,
+        # analyser_notifications) -- rodá-las aqui criaria essas tabelas
+        # dentro do banco compartilhado, contaminando um schema que não é
+        # mais nosso para gerenciar. `storage.run_migrations` continua
+        # existindo (usado pelos testes, contra POSTGRES_TEST_DB, um banco
+        # isolado) -- só não é mais chamado neste fluxo de produção. Ver
+        # classifier-prisma/context.md e docs/adr/0002 para o histórico
+        # (dono das migrations do System DB fica em aberto).
 
+        # Recorte de fase da v1 (decisão da equipe, 2026-08-28) -- só
+        # candidatos a presidente/vice-presidente e os partidos deles, não
+        # o universo inteiro de `entidade_matching`. Ver
+        # config/settings.yaml (`entity_scope.cargos`) e
+        # data/annotation/pendencias-tecnicas.md para o motivo (não é
+        # limitação técnica).
+        cargos_em_escopo = settings["entity_scope"]["cargos"]
         try:
-            entities = entities_store.load_and_validate(ENTITIES_PATH)
-        except entities_store.EntityValidationError as exc:
-            logger.error("Configuração de entidades inválida:\n%s", "\n".join(exc.errors))
+            entities = entities_store.load_active_entities_from_db(conn, cargos_em_escopo)
+        except ValueError as exc:
+            logger.error("Falha ao carregar entidades de entidade_matching: %s", exc)
             return 1
-
-        sync_result = entities_store.sync_entities(conn, entities)
-        conn.commit()
         logger.info(
-            "Sincronização de entidades: %d inseridas, %d atualizadas (%d no total)",
-            sync_result.inserted,
-            sync_result.updated,
+            "Entidades carregadas de entidade_matching (ativo=true, cargos=%s): %d",
+            cargos_em_escopo,
             len(entities),
         )
 
@@ -86,6 +104,13 @@ def main() -> int:
         # 19.2).
         message_conn = storage.get_connection()
         try:
+            # `handle_message` comita a conexão internamente (ver docstring
+            # de `message_handler.handle_message` e ADR 0004) -- grava
+            # resultado (`tabela_classificacao`) e notificação pendente
+            # (`classifier_analyser_outbox`) na mesma transação, e só então
+            # comita. Este closure não publica nada no RabbitMQ -- quem
+            # drena o outbox e publica de verdade é `src/notify_analyser.py`,
+            # rodando à parte (agendável via cron).
             message_handler.handle_message(
                 message_conn,
                 body,
@@ -95,13 +120,6 @@ def main() -> int:
                 model_name=model_name,
                 model_version=model_version,
             )
-            # Sem isso, o resultado fica só na transação implícita da
-            # conexão (aberta pela própria checagem de idempotência) e é
-            # perdido silenciosamente quando a conexão fecha logo abaixo
-            # sem commit -- persist_classification_result usa
-            # `with conn.transaction()`, que vira SAVEPOINT (não BEGIN) já
-            # havendo transação aberta, então não comita a conexão sozinho.
-            message_conn.commit()
         finally:
             message_conn.close()
 
