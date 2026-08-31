@@ -2,6 +2,12 @@
 
 Consolidado em 2026-08-25 -- reorganizado pra separar o que já foi resolvido (registro histórico, resumido) do que ainda está em aberto (o backlog de verdade). Itens renumerados nessa reorganização; se algo antigo referenciar "item N", o número pode ter mudado.
 
+## Correção de schema pelo DBA (2026-08-30) -- muda referências antigas neste documento
+
+O Gustavo (DBA) corrigiu `entidade_matching.nr_partido` de `text` pra `integer` (tipo correto, batendo com `tabela_partido.nr_partido`/`tabela_candidatura.nr_partido`) e adicionou duas foreign keys: `nr_titulo_eleitoral_candidato -> tabela_politico` e `nr_partido -> tabela_partido`. Onde este documento (mais abaixo) disser "`entidade_matching.nr_partido` é `text`" ou tratar a tabela como sem FK, está desatualizado -- histórico de quando foi escrito, não descrição do estado atual.
+
+**Efeito colateral real, encontrado em produção**: a query de `entities_store.load_active_entities_from_db` (`UNION ALL` entre políticos e partidos) tinha `NULL::text AS nr_partido` de um lado e `em.nr_partido` (agora `integer`) do outro -- quebrou com `psycopg.errors.DatatypeMismatch: UNION types text and integer cannot be matched` ao subir no ambiente do Anderson (Kubernetes). Corrigido com cast explícito (`em.nr_partido::text`), que funciona com os dois tipos -- 81/81 testes passando depois da correção. `scripts/sql/004_entidade_matching_schema.sql` também foi atualizado pra refletir o tipo `integer` e as duas FKs novas -- **`entidade_matching` não é mais uma tabela isolada**: replicar ela em prod agora exige que `tabela_politico` e `tabela_partido` já existam e estejam populadas antes, senão os `INSERT`s falham por violação de FK.
+
 ## Trabalho em andamento (2026-08-25, atualizado) -- se a sessão cair, retomar por aqui
 
 - **Item 2**: ✅ RESOLVIDO -- colunas `pipeline_version`/`evidencia_match` + constraint confirmadas direto no banco (`app_db2`).

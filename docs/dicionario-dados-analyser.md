@@ -15,7 +15,7 @@ Cadastro de entidades (políticos e partidos) que o Classifier reconhece em text
 | `id` | bigint | não | PK interna, sem significado de negócio. |
 | `entity_type` | text | não | `'politico'` ou `'partido'`. Define quais das colunas abaixo são preenchidas. |
 | `nr_titulo_eleitoral_candidato` | text | sim | Chave do TSE para o político (título eleitoral). Preenchida só quando `entity_type = 'politico'`. |
-| `nr_partido` | text | sim | Número do partido. Preenchida só quando `entity_type = 'partido'` — **atenção**: em linhas de político, esse campo é sempre `NULL`. Não dá pra saber o partido de um candidato só por esta tabela (ver seção 4). |
+| `nr_partido` | integer | sim | Número do partido. Preenchida só quando `entity_type = 'partido'` — **atenção**: em linhas de político, esse campo é sempre `NULL`. Não dá pra saber o partido de um candidato só por esta tabela (ver seção 4). FK pra `tabela_partido(nr_partido)` (adicionada pelo Gustavo/DBA em 2026-08-30, junto com FK de `nr_titulo_eleitoral_candidato` pra `tabela_politico`) — impede entidade "fantasma" sem candidato/partido real correspondente. |
 | `nome_principal` | text | não | Nome completo (político) ou nome do partido, em CAIXA ALTA (formato bruto do TSE). |
 | `aliases` | jsonb | não | Array de strings — variações de nome/apelido que o `entity_matcher` usa pra reconhecer a entidade no texto (ex.: `["LUIZ INÁCIO LULA DA SILVA", "LULA"]`). |
 | `sg_uf` | text | sim | UF do candidato (`'BR'` pra candidatos de cargo nacional, como presidente/vice). |
@@ -39,7 +39,7 @@ Resultado da classificação: uma linha por (parágrafo, entidade citada nele). 
 | `paragrafo_analisado` | text | sim | Texto do parágrafo onde a entidade foi identificada (evidência). |
 | `link_noticia` | text | sim | URL canônica da notícia. |
 | `nr_titulo_eleitoral_candidato` | varchar | sim | Preenchida quando a entidade classificada é um **político** (FK lógica pra `entidade_matching`/`tabela_politico`) — `NULL` quando é partido. |
-| `nr_partido` | integer | sim | Preenchida quando a entidade classificada é um **partido** (FK lógica pra `tabela_partido`) — `NULL` quando é político. **Atenção ao tipo**: aqui é `integer`, enquanto em `entidade_matching.nr_partido` é `text` — precisa de cast se for cruzar as duas. |
+| `nr_partido` | integer | sim | Preenchida quando a entidade classificada é um **partido** (FK lógica pra `tabela_partido`) — `NULL` quando é político. `entidade_matching.nr_partido` também é `integer` desde 2026-08-30 (corrigido pelo Gustavo/DBA, era `text` antes) — os dois batem no tipo agora, sem precisar de cast pra cruzar. |
 | `id_midia` | integer | sim | FK pra `tabela_midia`. Resolvida por um lookup de nome (`source_name` do payload → `tabela_midia.nome_midia`); fica `NULL` quando não encontra correspondência — **não é garantia de que sempre virá preenchido**. |
 | `classificacao_sentimento` | varchar | sim | Um de `'positivo'`, `'negativo'`, `'neutro'` — heurística léxica v1 (não é modelo de ML), ver `src/lexicon.py`. Não existe hoje um valor tipo "não relacionado" nesta coluna: se a entidade não foi citada no parágrafo, simplesmente não existe linha. |
 | `score_confianca` | double precision | sim | 0.0–1.0. Para a heurística léxica atual: `\|positivos − negativos\| / (positivos + negativos)`; `0.0` quando `classificacao_sentimento = 'neutro'` por ausência de termos do léxico (não é "baixa confiança", é "sem evidência textual"). |
