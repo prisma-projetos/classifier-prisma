@@ -199,8 +199,14 @@ def load_active_entities_from_db(
     para `entity_type='partido'`) -- por isso o JOIN com
     `tabela_candidatura` (mesmo schema compartilhado), usando
     `nr_titulo_eleitoral_candidato` como chave. Cast explícito
-    (`nr_partido::integer`) porque `entidade_matching.nr_partido` é `text`
-    e `tabela_candidatura.nr_partido` é `integer`.
+    (`nr_partido::integer`) porque `tabela_candidatura.nr_partido` é
+    `integer`. O `UNION ALL` final também exige `em.nr_partido::text` no
+    ramo de partido -- descoberto em produção (2026-08-30): o tipo real de
+    `entidade_matching.nr_partido` variou entre ambientes (`text` no banco
+    de dev usado nesta migração, `integer` no ambiente onde o Anderson
+    testou) -- sem esse cast explícito, o UNION falha com
+    `DatatypeMismatch` sempre que os dois ramos não combinam exatamente no
+    mesmo tipo. O cast deixa a query correta nos dois casos.
 
     NÃO filtra nem altera a coluna `ativo` de `entidade_matching` além do
     `WHERE ativo = true` que já existia -- esse campo é compartilhado com
@@ -234,7 +240,7 @@ def load_active_entities_from_db(
             UNION ALL
 
             SELECT em.entity_type, NULL::text AS nr_titulo_eleitoral_candidato,
-                   em.nr_partido, em.nome_principal, em.aliases
+                   em.nr_partido::text AS nr_partido, em.nome_principal, em.aliases
             FROM entidade_matching em
             WHERE em.entity_type = 'partido'
               AND em.ativo = true
