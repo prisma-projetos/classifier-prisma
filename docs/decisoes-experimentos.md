@@ -155,3 +155,22 @@ O treino usa somente registros com `split=train`, remove pares com teor `indeter
 **Melhorias futuras:** corrigir encoding na origem; limpar boilerplate, duplicações e truncamentos com rastreabilidade; definir filtro de foco para a próxima coleta. Não editar os textos desta rodada depois da geração das planilhas, pois isso altera offsets. Recomendações detalhadas estão em [`experiments/data/preparacao/data-quality-improvements.md`](../experiments/data/preparacao/data-quality-improvements.md).
 
 **Próxima etapa:** gerar as planilhas de anotação por anotador com os 15 IDs listados em cada `ids_<nome>.txt`, usando `experiments/data/entidades.yaml` e `data/raw/articles_202608191040.csv`. `scope_review` permanece pendente e a anotação ainda não começou; não há gabarito consensual ou split final.
+
+## D17. Artigo da disciplina usa só o piloto, com referência por voto da maioria (19/11/2026)
+
+**Decisão de Bea:** com a entrega do artigo em 26/11/2026, não há tempo para anotar a amostra de 60 notícias. O artigo vira um estudo exploratório sobre o piloto (5 notícias, 92 parágrafos). A anotação da amostra definitiva, o split 39/6/15 e a comparação com modelos treinados (TF-IDF e BERTimbau; sistemas B, C e D) passam para trabalhos futuros. O artigo é a entrega da disciplina e não será publicado agora.
+
+**O que o artigo passa a medir:** concordância entre anotadores (já calculada sobre os originais de `180337Z`), parcela de menções indiretas e desempenho das regras sem treino (matcher de produção, heurística de menção mais recente e léxico) contra uma referência consolidada do piloto.
+
+**Como a referência é montada:** voto da maioria sobre as planilhas atuais revisadas de `experiments/data/anotacao/piloto/` (D10 já aplicada), com cinco votantes: Beatriz, Cristovam, Gustavo, Lucas e Nicolas. Anderson fica fora porque sua planilha recebeu edição manual de Bea antes do primeiro backup, o que contaria o critério dela duas vezes, e porque cinco votantes reduzem empates. Uma resposta entra na referência quando pelo menos 3 dos 5 concordam; quando não há maioria, Bea desempata e a decisão fica registrada. Referências genéricas de partido (D15) não entram.
+
+**Limitações a declarar no artigo:** a referência não é um gabarito adjudicado nem vem de respostas totalmente independentes (as planilhas atuais passaram por revisão); as regras D10 a D12 foram formuladas olhando o piloto, o que tende a favorecer a heurística avaliada nele; o protocolo mudou depois do piloto (D15); cinco notícias não permitem generalização.
+
+**Execução da referência (19/11/2026):** `experiments/consolidate.py consolidar` gerou `experiments/results/piloto-referencia/` sem alterar as planilhas (SHA-256 conferido). Entraram 83 menções (79 com 5/5 votos, 1 com 4/5, 3 com 3/5), das quais 14 indiretas (≈ 17%), e 73 pares de teor. Foram descartadas 19 menções e 11 pares de teor sem maioria; a maior parte das menções descartadas são descrições ("seu filho", "o senador", "o governo petista") marcadas por um ou dois votantes, então a referência tende a reter só as menções indiretas mais evidentes. A unanimidade alta reflete a revisão das planilhas atuais; a concordância reportada no artigo continua sendo a dos originais de `180337Z`.
+
+**Decisões de Bea na consolidação:**
+- `T001`, 160-16 / Flávio (negativo 2, neutro 1, sem rótulo 2): **fora**. A menção "seu filho" não teve maioria, então a referência não registra Flávio nesse parágrafo e um teor sem menção ficaria incoerente.
+- 175-4 / PL (entity_id 22, neutro 5/5): **removido** com `aplicar --remover-teor 175-4:22`. A única referência ao PL no parágrafo é "A sigla", que pela D15 não gera teor.
+- Os outros três alertas de teor sem menção (145-7, 160-22, 175-6) ficam, por serem compatíveis com sujeito oculto.
+
+**Referência final:** `experiments/results/piloto-referencia-final/referencia.jsonl` (92 parágrafos, 83 menções, 72 pares de teor: 59 neutros, 12 negativos, 1 positivo), com as decisões em `decisoes-desempate.json`. Com um único positivo, F1 por classe e F1 macro de teor ficam instáveis; isso precisa ser declarado ao reportar a etapa de teor.
