@@ -1,6 +1,6 @@
 <div align="center">
 
-# 🏷 classifier-prisma
+# classifier-prisma
 
 **Classificador do PRISMA**: consome as notícias coletadas, identifica os políticos e partidos citados em cada parágrafo e classifica o teor do trecho (`positivo` / `neutro` / `negativo`) em relação a cada entidade.
 
@@ -16,29 +16,29 @@
 
 ---
 
-## 📍 Onde este módulo fica no PRISMA
+## Onde este módulo fica no PRISMA
 
 ```
 scrapping-prisma ──RabbitMQ──▶ [ classifier-prisma ] ──RabbitMQ──▶ analyser-prisma ──▶ System DB ──▶ api-prisma ──▶ app-prisma
                                   ▲ você está aqui
 ```
 
-## 📑 Sumário
+## Sumário
 
-- [Visão geral](#-visão-geral)
-- [Arquitetura](#-arquitetura)
-- [Pipeline de classificação](#-pipeline-de-classificação)
-- [Persistência e integração](#-persistência-e-integração)
-- [Estrutura do repositório](#-estrutura-do-repositório)
-- [Como rodar](#-como-rodar)
-- [Variáveis de ambiente](#-variáveis-de-ambiente)
-- [Testes](#-testes)
-- [CI/CD](#-cicd)
-- [Limitações da baseline v1](#-limitações-da-baseline-v1)
-- [Documentação](#-documentação)
-- [Repositórios do PRISMA](#-repositórios-do-prisma)
+- [Visão geral](#visão-geral)
+- [Arquitetura](#arquitetura)
+- [Pipeline de classificação](#pipeline-de-classificação)
+- [Persistência e integração](#persistência-e-integração)
+- [Estrutura do repositório](#estrutura-do-repositório)
+- [Como rodar](#como-rodar)
+- [Variáveis de ambiente](#variáveis-de-ambiente)
+- [Testes](#testes)
+- [CI/CD](#cicd)
+- [Limitações da baseline v1](#limitações-da-baseline-v1)
+- [Documentação](#documentação)
+- [Repositórios do PRISMA](#repositórios-do-prisma)
 
-## 🔎 Visão geral
+## Visão geral
 
 | | |
 |---|---|
@@ -51,7 +51,7 @@ scrapping-prisma ──RabbitMQ──▶ [ classifier-prisma ] ──RabbitMQ─
 
 **Fora do escopo:** coletar conteúdo, agregar análise por entidade, expor API pública e classificar viés ideológico (por decisão de produto).
 
-## 🏗 Arquitetura
+## Arquitetura
 
 ```mermaid
 flowchart LR
@@ -83,7 +83,7 @@ Dois processos em produção ([ADR 0004](docs/adr/0004-outbox-proprio-para-notif
 | `src/main.py` | *Daemon* (Deployment) | Consome a fila, classifica e grava o resultado e a notificação pendente **na mesma transação**. Só faz ACK depois do commit |
 | `src/notify_analyser.py` | *Run-once* (CronJob) | Drena o outbox e publica no RabbitMQ com retry (`attempts`/`max_attempts`) e circuit breaker |
 
-## 🧩 Pipeline de classificação
+## Pipeline de classificação
 
 `src/pipeline.py` é uma **função pura**, testável sem banco nem fila.
 
@@ -97,7 +97,7 @@ Dois processos em produção ([ADR 0004](docs/adr/0004-outbox-proprio-para-notif
 - **Performance do matcher:** um pré-filtro com índice de aliases e cache de regex levou o custo de cerca de 130 ms para cerca de 0,6 ms por parágrafo com 1.393 entidades (aproximadamente 200 vezes mais rápido). No escopo v1, de 40 entidades, fica em cerca de 0,09 ms.
 - **Ampliar o escopo** (por exemplo, governador e senador) exige só editar `entity_scope.cargos` em `config/settings.yaml`, sem mudar código.
 
-## 🗄 Persistência e integração
+## Persistência e integração
 
 | Fronteira | Mecanismo | Decisão |
 |---|---|---|
@@ -112,7 +112,7 @@ Dois processos em produção ([ADR 0004](docs/adr/0004-outbox-proprio-para-notif
   - `0005` e `0006`: réplicas de teste de `tabela_classificacao`, das tabelas relacionadas e do outbox.
 - Em produção o classifier **não declara topologia** no RabbitMQ. O `docker-compose.yml` sobe um broker já provisionado só para desenvolvimento ([`docker/rabbitmq/`](docker/rabbitmq/README.md)).
 
-## 📂 Estrutura do repositório
+## Estrutura do repositório
 
 ```
 ├── config/
@@ -138,7 +138,7 @@ Dois processos em produção ([ADR 0004](docs/adr/0004-outbox-proprio-para-notif
 └── docker-compose.yml       # Postgres + RabbitMQ (management) para dev
 ```
 
-## 🚀 Como rodar
+## Como rodar
 
 **Pré-requisitos:** Python 3.14 e Docker.
 
@@ -183,7 +183,7 @@ Detalhes em [`docs/scraper-como-atualizar-target-entities.md`](docs/scraper-como
 
 </details>
 
-## ⚙ Variáveis de ambiente
+## Variáveis de ambiente
 
 Todas estão documentadas com comentários em [`.env.example`](.env.example).
 
@@ -194,7 +194,7 @@ Todas estão documentadas com comentários em [`.env.example`](.env.example).
 | **Consumo (scraper → classifier)** | `RABBITMQ_CONSUMER_USER`, `RABBITMQ_CONSUMER_PASSWORD`, `RABBITMQ_CONSUMER_QUEUE`, `RABBITMQ_CONSUMER_PREFETCH_COUNT`, `RABBITMQ_RECONNECT_DELAY_SECONDS` |
 | **Notificação (classifier → analyser)** | `RABBITMQ_NOTIFIER_USER`, `RABBITMQ_NOTIFIER_PASSWORD`, `RABBITMQ_NOTIFIER_EXCHANGE`, `RABBITMQ_NOTIFIER_EXCHANGE_TYPE`, `RABBITMQ_NOTIFIER_QUEUE`, `RABBITMQ_NOTIFIER_ROUTING_KEY`, `RABBITMQ_NOTIFIER_DURABLE` |
 
-## 🧪 Testes
+## Testes
 
 ```bash
 docker compose up -d postgres
@@ -205,11 +205,11 @@ pytest
 - A publicação no RabbitMQ usa *fakes*: `test_message_handler.py` cobre a atomicidade entre classificação e outbox, e `test_notification_publisher.py` cobre claim, retry, circuit breaker e idempotência.
 - **Exceção:** `test_entities_store.py` lê o `app_db2` real (só leitura) para validar o recorte v1, por isso exige acesso de rede ao banco.
 
-## 🔁 CI/CD
+## CI/CD
 
 `.gitea/workflows/ci-cd.yaml`: em push para `main`/`develop`, faz build da imagem → atualiza os manifestos → sincroniza no **ArgoCD**. O agendamento do `notify_analyser.py` é um CronJob do Kubernetes mantido pela infra.
 
-## ⚠ Limitações da baseline v1
+## Limitações da baseline v1
 
 - **Granularidade por parágrafo:** duas entidades no mesmo parágrafo recebem a mesma categoria.
 - **Não trata** negação, ironia, citação de terceiros nem comparação.
@@ -219,7 +219,7 @@ pytest
 
 Decisões em aberto e próximos passos: [`context.md` § 9](context.md#9-decisões-em-aberto-específicas-deste-repositório) e [`data/annotation/pendencias-tecnicas.md`](data/annotation/pendencias-tecnicas.md).
 
-## 📚 Documentação
+## Documentação
 
 | Documento | Conteúdo |
 |---|---|
@@ -230,14 +230,14 @@ Decisões em aberto e próximos passos: [`context.md` § 9](context.md#9-decisõ
 | [`docs/propostas-mudancas-scraper.md`](docs/propostas-mudancas-scraper.md) | Alinhamento de escopo com o scraper |
 | [`experiments/README.md`](experiments/README.md) | Ferramentas e resultados do artigo |
 
-## 🧭 Repositórios do PRISMA
+## Repositórios do PRISMA
 
 | Repositório | Papel |
 |---|---|
 | [`.github`](https://github.com/prisma-projetos) | Página da organização |
-| [`scrapping-prisma`](https://github.com/prisma-projetos/scrapping-prisma) | 📰 Coleta de notícias |
-| **`classifier-prisma`** | 🏷 Identificação de entidades e classificação do teor *(este)* |
-| [`analyser-prisma`](https://github.com/prisma-projetos/analyser-prisma) | 🧠 Resumos e panoramas com LLM |
-| [`api-prisma`](https://github.com/prisma-projetos/api-prisma) | 🔌 API REST somente leitura |
-| [`app-prisma`](https://github.com/prisma-projetos/app-prisma) | 🖥 Interface web |
-| [`experiments-prisma`](https://github.com/prisma-projetos/experiments-prisma) | 🔬 Documentação, ADRs e experimentos do artigo |
+| [`scrapping-prisma`](https://github.com/prisma-projetos/scrapping-prisma) | Coleta de notícias |
+| **`classifier-prisma`** | Identificação de entidades e classificação do teor *(este)* |
+| [`analyser-prisma`](https://github.com/prisma-projetos/analyser-prisma) | Resumos e panoramas com LLM |
+| [`api-prisma`](https://github.com/prisma-projetos/api-prisma) | API REST somente leitura |
+| [`app-prisma`](https://github.com/prisma-projetos/app-prisma) | Interface web |
+| [`experiments-prisma`](https://github.com/prisma-projetos/experiments-prisma) | Documentação, ADRs e experimentos do artigo |
