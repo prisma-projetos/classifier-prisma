@@ -6,6 +6,7 @@ Componente responsável por classificar, individualmente, o teor de cada conteú
 Scraper (scrapping-prisma) --RabbitMQ--> Classifier (este repositório) --RabbitMQ--> Analyser
 ```
 
+
 ## Visão geral
 
 O Classifier recebe um conteúdo já coletado (ex.: notícia), identifica quais políticos/partidos são mencionados, classifica o teor de cada trecho em relação a cada entidade (`neutro` / `negativo` / `positivo`), persiste o resultado no System DB e sinaliza o Analyser de que há resultado novo para agregar.

@@ -1,0 +1,14 @@
+.git
+.venv
+__pycache__
+*.pyc
+logs/
+data/
+docs/
+tests/
+scripts/
+.env
+.env.example
+db/migrations
+docker/rabbitmq
+*.md

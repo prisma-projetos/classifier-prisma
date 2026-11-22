@@ -186,3 +186,60 @@ def test_fuzzy_multiword_alias_does_not_match_generic_country_mention():
     )
 
     assert matches == []
+
+
+# Caso real reportado pela Bea (2026-08-30): alias cadastrado em
+# `entidade_matching` sem acento (dado real do TSE, acentuação
+# inconsistente), mas o texto jornalístico real escreve com acento --
+# antes da correção, isso não casava nem no exato nem no fuzzy (a
+# diferença de UMA letra acentuada já derruba `fuzz.ratio` abaixo do
+# threshold de 85%: "flavio" vs "flávio" = 83,3%).
+FLAVIO_BOLSONARO = Entity(
+    id="flavio-bolsonaro",
+    canonical_name="FLAVIO NANTES BOLSONARO",
+    entity_type="politician",
+    aliases=("FLAVIO NANTES BOLSONARO", "FLAVIO BOLSONARO"),
+)
+
+
+def test_exact_match_ignores_accent_missing_in_alias():
+    matches = match_entities(
+        "A nova pesquisa aponta empate técnico entre o senador Flávio Bolsonaro (PL) e o "
+        "presidente Lula (PT) em um virtual segundo turno.",
+        [FLAVIO_BOLSONARO],
+        fuzzy_threshold=0.85,
+    )
+
+    assert len(matches) == 1
+    assert matches[0].entity_id == "flavio-bolsonaro"
+    assert matches[0].match_type == "exact"
+    assert matches[0].score == 1.0
+
+
+def test_fuzzy_match_ignores_accent_missing_in_alias():
+    # Mesmo caso, mas forçando o caminho fuzzy: "Bolsonaro" sozinho não
+    # está nos aliases, só a combinação com o primeiro nome -- um erro de
+    # digitação real (falta a última letra) tem que continuar aceito
+    # mesmo com o acento a mais no texto.
+    matches = match_entities(
+        "O senador Flávio Bolsonar (PL) participou do evento em Brasília.",
+        [FLAVIO_BOLSONARO],
+        fuzzy_threshold=0.85,
+    )
+
+    assert len(matches) == 1
+    assert matches[0].entity_id == "flavio-bolsonaro"
+    assert matches[0].match_type == "fuzzy"
+
+
+def test_accent_folding_does_not_reopen_false_positive_of_word_boundary():
+    # Confirma que dobrar acento não enfraquece a proteção de fronteira de
+    # palavra já existente: "Lulalândia" (fictício) não pode virar match de
+    # "Lula" só porque o "â" central foi dobrado pra "a".
+    matches = match_entities(
+        "A cidade fictícia de Lulalândia foi citada como exemplo em um estudo.",
+        [Entity(id="lula", canonical_name="Lula", entity_type="politician", aliases=("Lula",))],
+        fuzzy_threshold=0.85,
+    )
+
+    assert matches == []

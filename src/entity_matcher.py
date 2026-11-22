@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 from dataclasses import dataclass
 from functools import lru_cache
 
@@ -62,22 +63,56 @@ def _alias_pattern(alias: str, flags: int) -> re.Pattern[str]:
     return re.compile(r"\b" + re.escape(alias) + r"\b", flags)
 
 
-def _exact_match(alias: str, paragraph: str) -> bool:
-    """Match exato por palavra (`\\b...\\b`), case-insensitive por padrão.
+def _fold_diacritics(text: str) -> str:
+    """Remove diacríticos (acento agudo, til, cedilha, circunflexo etc.),
+    mantendo a letra base -- "á"/"ã"/"a" e "ç"/"c" tornam-se equivalentes
+    pra fins de comparação. NUNCA usado pra alterar texto salvo/exibido, só
+    como forma auxiliar de comparação.
+
+    Motivo (caso real, reportado pela Bea em 2026-08-30 e confirmado
+    rodando o parágrafo de verdade): a acentuação em `entidade_matching`
+    (TSE) é inconsistente -- ex.: aliases de "Flávio Bolsonaro" cadastrados
+    como `["FLAVIO NANTES BOLSONARO", "FLAVIO BOLSONARO"]`, sem acento,
+    mas o texto jornalístico real escreve "Flávio Bolsonaro" (com acento).
+    Sem dobrar o acento, o match exato falha (caracteres diferentes) E o
+    fuzzy também falha: `fuzz.ratio("flavio", "flávio")` é 83,3%, abaixo do
+    `fuzzy_threshold` default de 85% -- a diferença de UM caractere
+    acentuado já é suficiente pra derrubar o score abaixo do corte."""
+    return "".join(c for c in unicodedata.normalize("NFKD", text) if not unicodedata.combining(c))
+
+
+@lru_cache(maxsize=8192)
+def _fold_diacritics_alias(text: str) -> str:
+    """Wrapper com cache de `_fold_diacritics`, só pra strings do tamanho de
+    alias/palavra -- aliases se repetem em toda chamada de `match_entities`
+    (~4.100 no volume real), então o custo de normalizar sai da conta
+    depois da primeira vez. NÃO usar pra parágrafo (string longa, quase
+    nunca repete de uma chamada pra outra -- encheria o cache à toa, sem
+    ganho de acerto)."""
+    return _fold_diacritics(text)
+
+
+def _exact_match(alias: str, folded_paragraph: str) -> bool:
+    """Match exato por palavra (`\\b...\\b`), case-insensitive e
+    acento-insensitive por padrão (`folded_paragraph` já veio sem
+    diacríticos de `match_entities` -- ver `_fold_diacritics`).
 
     Exceção: aliases em `_CASE_SENSITIVE_ALIASES` (siglas de partido que
     coincidem com palavra comum do português) exigem Title Case exato
-    (case-sensitive) -- ver comentário acima do dicionário. Pra todo o
-    resto (nomes de político, outros partidos), o comportamento continua
-    IGNORECASE normal."""
+    (case-sensitive) -- ver comentário acima do dicionário. Nenhum desses 7
+    aliases tem acento, então dobrar diacrítico no parágrafo não muda nada
+    pra esse caminho. Pra todo o resto (nomes de político, outros
+    partidos), o comportamento continua IGNORECASE normal, agora também
+    ignorando acentuação."""
     special_form = _CASE_SENSITIVE_ALIASES.get(alias.upper())
     if special_form is not None:
-        return _alias_pattern(special_form, re.UNICODE).search(paragraph) is not None
+        return _alias_pattern(special_form, re.UNICODE).search(folded_paragraph) is not None
 
-    return _alias_pattern(alias, re.IGNORECASE | re.UNICODE).search(paragraph) is not None
+    folded_alias = _fold_diacritics_alias(alias)
+    return _alias_pattern(folded_alias, re.IGNORECASE | re.UNICODE).search(folded_paragraph) is not None
 
 
-def _fuzzy_match_score(alias: str, paragraph: str) -> float:
+def _fuzzy_match_score(alias: str, folded_paragraph: str) -> float:
     """Compara o alias contra janelas de palavras do parágrafo (não a string
     inteira) -- `fuzz.partial_ratio` sobre o parágrafo inteiro casaria "Lula"
     como substring de "Lulalândia" com score 1.0, já que ele ignora fronteira
@@ -94,20 +129,27 @@ def _fuzzy_match_score(alias: str, paragraph: str) -> float:
     baixo de "lula" vs "da" e é rejeitada, enquanto um erro de digitação real
     (ex.: "presidente Lulla") mantém as duas palavras com ratio alto e
     continua sendo aceito. Para alias de uma palavra só, isso reduz ao mesmo
-    comportamento de antes."""
+    comportamento de antes.
+
+    `folded_paragraph` já vem sem diacríticos de `match_entities` (ver
+    `_fold_diacritics`) -- os aliases são dobrados aqui, palavra por
+    palavra, com a versão em cache (`_fold_diacritics_alias`). Sem isso,
+    uma única letra acentuada derruba o ratio o suficiente pra ficar abaixo
+    do threshold (ex.: "flavio" vs "flávio" = 83,3%, abaixo do default de
+    85%) -- caso real, ver `_fold_diacritics`."""
     alias_words = alias.split()
     window_size = len(alias_words)
-    paragraph_words = _WORD_RE.findall(paragraph)
+    paragraph_words = _WORD_RE.findall(folded_paragraph)
     if window_size == 0 or len(paragraph_words) < window_size:
         return 0.0
 
-    alias_words_lower = [w.lower() for w in alias_words]
+    alias_words_folded = [_fold_diacritics_alias(w.lower()) for w in alias_words]
     best_score = 0.0
     for i in range(len(paragraph_words) - window_size + 1):
         window_words = paragraph_words[i : i + window_size]
         score = min(
             fuzz.ratio(alias_word, window_word.lower())
-            for alias_word, window_word in zip(alias_words_lower, window_words)
+            for alias_word, window_word in zip(alias_words_folded, window_words)
         ) / 100.0
         if score > best_score:
             best_score = score
@@ -152,11 +194,13 @@ def _fuzzy_match_score(alias: str, paragraph: str) -> float:
 # por causa da exigência de Title Case -- só descarta quando a palavra nem
 # parecida está no parágrafo.
 #
-# Premissa registrada: a presença de uma palavra é comparada em `str.lower()`,
-# enquanto `_exact_match` usa `re.IGNORECASE`. Os dois divergem só em
-# caracteres Unicode exóticos (ex.: 'ſ' casa com 's' no IGNORECASE mas não no
-# lower()), que não ocorrem em texto jornalístico PT-BR nem em nomes vindos do
-# TSE. `_fuzzy_match_score` já assumia o mesmo (compara em `.lower()`).
+# Premissa registrada: a presença de uma palavra é comparada em `str.lower()`
+# sobre texto já sem diacríticos (`_fold_diacritics`), enquanto `_exact_match`
+# usa `re.IGNORECASE` também sobre texto já sem diacríticos. Os dois divergem
+# só em caracteres Unicode exóticos (ex.: 'ſ' casa com 's' no IGNORECASE mas
+# não no lower()), que não ocorrem em texto jornalístico PT-BR nem em nomes
+# vindos do TSE. `_fuzzy_match_score` já assumia o mesmo (compara em
+# `.lower()` sobre texto dobrado).
 
 
 @dataclass(frozen=True)
@@ -196,8 +240,8 @@ def _build_alias_index(entities: list[Entity]) -> _AliasIndex:
     for entity in entities:
         prepared: list[_PreparedAlias] = []
         for alias in entity.all_match_candidates():
-            fuzzy_words = tuple(word.lower() for word in alias.split())
-            exact_words = tuple(word.lower() for word in _WORD_RE.findall(alias))
+            fuzzy_words = tuple(_fold_diacritics_alias(word.lower()) for word in alias.split())
+            exact_words = tuple(_fold_diacritics_alias(word.lower()) for word in _WORD_RE.findall(alias))
             prepared.append(
                 _PreparedAlias(
                     alias=alias,
@@ -314,9 +358,18 @@ def match_entities(paragraph: str, entities: list[Entity], *, fuzzy_threshold: f
 
     Aliases sem nenhuma chance de casar são descartados antes de pagar o
     custo de regex/fuzzy -- ver o bloco "Pré-filtro de candidatos" acima.
-    É só performance: o conjunto de matches devolvido é o mesmo de antes."""
+    É só performance: o conjunto de matches devolvido é o mesmo de antes.
+
+    Acentuação é ignorada na comparação (`_fold_diacritics`) -- o parágrafo
+    é dobrado uma vez só aqui (string longa, não cacheada; ver
+    `_fold_diacritics_alias` pro lado do alias, que É cacheado por se
+    repetir em toda chamada). Caso real que motivou isso: alias cadastrado
+    sem acento ("FLAVIO BOLSONARO") não batia com o texto real, que usa
+    acento ("Flávio Bolsonaro") -- nem no exato, nem no fuzzy (a diferença
+    de uma letra acentuada já derruba o ratio abaixo do threshold)."""
     index = _alias_index_for(entities)
-    paragraph_words_lower = [word.lower() for word in _WORD_RE.findall(paragraph)]
+    folded_paragraph = _fold_diacritics(paragraph)
+    paragraph_words_lower = [word.lower() for word in _WORD_RE.findall(folded_paragraph)]
     hits = _candidate_word_hits(index, paragraph_words_lower, fuzzy_threshold)
 
     matches: list[EntityMatch] = []
@@ -329,7 +382,7 @@ def match_entities(paragraph: str, entities: list[Entity], *, fuzzy_threshold: f
                 continue
 
             alias = prepared.alias
-            if _exact_match(alias, paragraph):
+            if _exact_match(alias, folded_paragraph):
                 best = EntityMatch(
                     entity_id=entity.id,
                     entity_type=entity.entity_type,
@@ -342,7 +395,7 @@ def match_entities(paragraph: str, entities: list[Entity], *, fuzzy_threshold: f
             if alias.upper() in _CASE_SENSITIVE_ALIASES:
                 continue  # sem fallback fuzzy pra esses -- ver docstring acima
 
-            fuzzy_score = _fuzzy_match_score(alias, paragraph)
+            fuzzy_score = _fuzzy_match_score(alias, folded_paragraph)
             if fuzzy_score >= fuzzy_threshold and (best is None or fuzzy_score > best.score):
                 best = EntityMatch(
                     entity_id=entity.id,
