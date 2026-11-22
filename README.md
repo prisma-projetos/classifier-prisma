@@ -1,198 +1,243 @@
-# Classifier — Prisma
+<div align="center">
 
-Componente responsável por classificar, individualmente, o teor de cada conteúdo coletado sobre políticos e partidos. Fica no meio do pipeline da plataforma Prisma:
+# 🏷 classifier-prisma
+
+**Classificador do PRISMA**: consome as notícias coletadas, identifica os políticos e partidos citados em cada parágrafo e classifica o teor do trecho (`positivo` / `neutro` / `negativo`) em relação a cada entidade.
+
+![Python](https://img.shields.io/badge/Python-3.14-3776AB?logo=python&logoColor=white)
+![PostgreSQL](https://img.shields.io/badge/PostgreSQL-System_DB-4169E1?logo=postgresql&logoColor=white)
+![RabbitMQ](https://img.shields.io/badge/RabbitMQ-consumer_%2B_outbox-FF6600?logo=rabbitmq&logoColor=white)
+![Docker](https://img.shields.io/badge/Docker-ready-2496ED?logo=docker&logoColor=white)
+![Deploy](https://img.shields.io/badge/deploy-ArgoCD-EF7B4D?logo=argo&logoColor=white)
+
+[Organização PRISMA](https://github.com/prisma-projetos) · [Documentação e experimentos](https://github.com/prisma-projetos/experiments-prisma)
+
+</div>
+
+---
+
+## 📍 Onde este módulo fica no PRISMA
 
 ```
-Scraper (scrapping-prisma) --RabbitMQ--> Classifier (este repositório) --RabbitMQ--> Analyser
+scrapping-prisma ──RabbitMQ──▶ [ classifier-prisma ] ──RabbitMQ──▶ analyser-prisma ──▶ System DB ──▶ api-prisma ──▶ app-prisma
+                                  ▲ você está aqui
 ```
 
+## 📑 Sumário
 
-## Visão geral
+- [Visão geral](#-visão-geral)
+- [Arquitetura](#-arquitetura)
+- [Pipeline de classificação](#-pipeline-de-classificação)
+- [Persistência e integração](#-persistência-e-integração)
+- [Estrutura do repositório](#-estrutura-do-repositório)
+- [Como rodar](#-como-rodar)
+- [Variáveis de ambiente](#-variáveis-de-ambiente)
+- [Testes](#-testes)
+- [CI/CD](#-cicd)
+- [Limitações da baseline v1](#-limitações-da-baseline-v1)
+- [Documentação](#-documentação)
+- [Repositórios do PRISMA](#-repositórios-do-prisma)
 
-O Classifier recebe um conteúdo já coletado (ex.: notícia), identifica quais políticos/partidos são mencionados, classifica o teor de cada trecho em relação a cada entidade (`neutro` / `negativo` / `positivo`), persiste o resultado no System DB e sinaliza o Analyser de que há resultado novo para agregar.
+## 🔎 Visão geral
+
+| | |
+|---|---|
+| **Entrada** | Mensagens da fila `scraper.dados.queue` com o texto completo da notícia |
+| **Processamento** | Segmentação em parágrafos → *matching* de entidades (exato e fuzzy) → classificação por léxico |
+| **Unidade de saída** | Uma linha por **(parágrafo, entidade)**, com categoria, confiança e evidência |
+| **Persistência** | `tabela_classificacao` no System DB compartilhado (`app_db2`) |
+| **Notificação** | Outbox próprio (`classifier_analyser_outbox`) drenado para o RabbitMQ → `analyser-prisma` |
+| **Escopo v1** | Candidatos a **presidente e vice-presidente** e seus partidos: 40 entidades (26 políticos e 14 partidos, dados do TSE) |
+
+**Fora do escopo:** coletar conteúdo, agregar análise por entidade, expor API pública e classificar viés ideológico (por decisão de produto).
+
+## 🏗 Arquitetura
 
 ```mermaid
 flowchart LR
-    Scraper["Scraper (scrapping-prisma)"] -->|"RabbitMQ: fila scraper.dados.queue"| Classifier["Classifier: src/main.py (consumidor contínuo)"]
+    SCR["scrapping-prisma"] -->|"scraper.dados.queue"| MAIN
 
-    subgraph DB["app_db2 — System DB compartilhado"]
-        EM[("entidade_matching + tabela_candidatura, filtrado por ds_cargo")]
-        TC[("tabela_classificacao")]
-        OUT[("classifier_analyser_outbox — uso exclusivo do Classifier")]
+    subgraph classifier["classifier-prisma"]
+        MAIN["src/main.py<br/>consumidor contínuo"]
+        NOTIFY["src/notify_analyser.py<br/>job run-once (CronJob)"]
     end
 
-    EM -.->|"lê entidades do escopo v1"| Classifier
-    Classifier -->|"grava resultado"| TC
-    Classifier -->|"enfileira notificação (mesma transação)"| OUT
-    OUT -->|"drena (processo separado)"| Notify["src/notify_analyser.py (CronJob agendado)"]
-    Notify -->|"publica"| RMQ2["RabbitMQ: fila/exchange a confirmar c/ DevOps"]
-    RMQ2 --> Analyser["Analyser (fora deste repositório)"]
+    subgraph db["app_db2 · System DB compartilhado"]
+        EM[("entidade_matching<br/>+ tabela_candidatura")]
+        TC[("tabela_classificacao")]
+        OUT[("classifier_analyser_outbox<br/>uso exclusivo do classifier")]
+    end
+
+    EM -. "entidades do escopo v1" .-> MAIN
+    MAIN -->|"mesma transação"| TC
+    MAIN -->|"mesma transação"| OUT
+    OUT --> NOTIFY
+    NOTIFY -->|"retry + circuit breaker"| MQ[["RabbitMQ"]]
+    MQ --> AN["analyser-prisma"]
 ```
 
-`app_db2` é o System DB **compartilhado** da plataforma — `entidade_matching` e `tabela_classificacao` também são lidas/gravadas por outros componentes. `classifier_analyser_outbox` mora fisicamente no mesmo banco, mas é de uso **exclusivo** do Classifier (só ele lê e escreve) — ver ADR 0004 e a seção "Persistência e integração" abaixo.
+Dois processos em produção ([ADR 0004](docs/adr/0004-outbox-proprio-para-notificacao-analyser.md)):
 
-Este README cobre **como rodar o projeto**. Para responsabilidade detalhada, contrato de dados, regras de classificação, riscos e decisões em aberto, ver [`context.md`](context.md) (contexto deste repositório) e o `context.md` da raiz do Lab-inovação (fonte da verdade do produto).
+| Processo | Tipo | Responsabilidade |
+|---|---|---|
+| `src/main.py` | *Daemon* (Deployment) | Consome a fila, classifica e grava o resultado e a notificação pendente **na mesma transação**. Só faz ACK depois do commit |
+| `src/notify_analyser.py` | *Run-once* (CronJob) | Drena o outbox e publica no RabbitMQ com retry (`attempts`/`max_attempts`) e circuit breaker |
 
-Não é responsabilidade deste componente: coletar conteúdo, gerar análise agregada por entidade, expor API pública, apresentar resultado em interface, ou classificar viés político/ideológico (decisão de escopo do produto).
+## 🧩 Pipeline de classificação
 
-## Arquitetura resumida
+`src/pipeline.py` é uma **função pura**, testável sem banco nem fila.
 
-### Modo de execução
+| # | Etapa | Módulo | Como |
+|---|---|---|---|
+| 1 | Segmentação | `segmentation.py` | Divide o texto em parágrafos. Só aceita `content_type = news_article` |
+| 2 | Identificação de entidades | `entity_matcher.py` | Match exato por palavra e fuzzy (`rapidfuzz`) contra os aliases de `entidade_matching`. **Não é NER** |
+| 3 | Classificação | `lexicon.py` | Conta termos positivos e negativos de `config/lexicon.yaml`; a contagem maior define a categoria |
 
-Dois processos de produção (ver ADR 0004):
+- **Confiança:** `|pos − neg| / (pos + neg)`. É uma heurística, não uma probabilidade calibrada.
+- **Performance do matcher:** um pré-filtro com índice de aliases e cache de regex levou o custo de cerca de 130 ms para cerca de 0,6 ms por parágrafo com 1.393 entidades (aproximadamente 200 vezes mais rápido). No escopo v1, de 40 entidades, fica em cerca de 0,09 ms.
+- **Ampliar o escopo** (por exemplo, governador e senador) exige só editar `entity_scope.cargos` em `config/settings.yaml`, sem mudar código.
 
-- `src/main.py` — daemon (contínuo) que consome a fila do Scraper, classifica, persiste em `tabela_classificacao` e enfileira a notificação pendente pro Analyser em `classifier_analyser_outbox`, na mesma transação, antes do commit. Não publica nada no RabbitMQ diretamente. Precisa ficar no ar (ex.: serviço/supervisor).
-- `src/notify_analyser.py` — processo separado ("roda uma vez e sai", agendável via cron) que drena `classifier_analyser_outbox` e publica de fato no RabbitMQ, com retry e circuit breaker.
+## 🗄 Persistência e integração
 
-### Fluxo de classificação (pipeline)
+| Fronteira | Mecanismo | Decisão |
+|---|---|---|
+| Scraper → Classifier | RabbitMQ (outbox no scraper). O classifier **nunca** acessa o banco do scraper | [ADR 0001](docs/adr/0001-scraper-classifier-rabbitmq-outbox.md) |
+| Classifier → System DB | `INSERT` idempotente em `tabela_classificacao` (`ON CONFLICT` em artigo + parágrafo + entidade + `pipeline_version`) | [ADR 0002](docs/adr/0002-system-db-compartilhado-outbox-analyser.md) |
+| Classifier → Analyser | Outbox transacional próprio + publisher separado | ~~[ADR 0003](docs/adr/0003-notificacao-analyser-publicacao-direta.md)~~ → [ADR 0004](docs/adr/0004-outbox-proprio-para-notificacao-analyser.md) (vigente) |
 
-Para cada mensagem consumida (um conteúdo):
+- O **formato do payload** enviado ao analyser já está fechado: veja [`docs/dicionario-dados-analyser.md`](docs/dicionario-dados-analyser.md) e `src/analyser_notifier.py::build_notification_payload`.
+- O schema de `app_db2` é gerenciado fora deste repositório. Os DDLs aplicados manualmente estão em `scripts/sql/`.
+- `db/migrations/` é aplicado **somente no banco de teste**:
+  - `0001`–`0004`: schema antigo, que não recebe mais gravações em produção;
+  - `0005` e `0006`: réplicas de teste de `tabela_classificacao`, das tabelas relacionadas e do outbox.
+- Em produção o classifier **não declara topologia** no RabbitMQ. O `docker-compose.yml` sobe um broker já provisionado só para desenvolvimento ([`docker/rabbitmq/`](docker/rabbitmq/README.md)).
 
-1. **Segmentação** (`src/segmentation.py`) — separa o texto em parágrafos. Hoje só existe estratégia para `content_type = news_article`.
-2. **Identificação de entidades** (`src/entity_matcher.py`) — para cada parágrafo, verifica quais políticos/partidos (carregados de `entidade_matching`, ver "Escopo de entidades (v1)" abaixo) são mencionados, por match exato (por palavra) ou fuzzy (rapidfuzz, contra janelas de palavras do mesmo tamanho do apelido). Não é NER.
-3. **Classificação léxico/regra** (`src/lexicon.py`) — para cada parágrafo com pelo menos uma entidade identificada, conta ocorrências de termos positivos/negativos de `config/lexicon.yaml` e decide a categoria pela contagem maior. Essa é a baseline v1 — ver limitações abaixo.
+## 📂 Estrutura do repositório
 
-O resultado é uma linha por (parágrafo, entidade) — `src/pipeline.py` é uma função pura, testável sem banco/fila.
+```
+├── config/
+│   ├── settings.yaml        # threshold fuzzy, escopo de cargos, versão do modelo, log
+│   ├── lexicon.yaml         # léxico PT-BR artesanal (baseline)
+│   └── entities.yaml        # legado: só benchmarks e anotação
+├── src/
+│   ├── main.py              # consumidor contínuo (entrypoint 1)
+│   ├── notify_analyser.py   # drena o outbox (entrypoint 2)
+│   ├── pipeline.py          # segmentação → matching → léxico (função pura)
+│   ├── segmentation.py · entity_matcher.py · lexicon.py
+│   ├── message_handler.py   # transação: classificação + outbox + ACK
+│   ├── classification_store.py · entities_store.py · notifications_store.py
+│   ├── rabbitmq_consumer.py · rabbitmq_publisher.py · notification_publisher.py
+│   └── payload.py · analyser_notifier.py · storage.py
+├── db/migrations/           # schema de teste (nunca aplicado em app_db2)
+├── scripts/                 # export de entidades, benchmark, anotação, sql/ do app_db2
+├── experiments/             # ferramentas do artigo (espelhadas no experiments-prisma)
+├── data/annotation/         # lotes e consolidação da anotação
+├── docs/                    # ADRs, protocolos de anotação, dicionário de dados
+├── tests/                   # pytest (inclui tests/experiments)
+├── docker/                  # Dockerfile + topologia RabbitMQ local
+└── docker-compose.yml       # Postgres + RabbitMQ (management) para dev
+```
 
-### Escopo de entidades (v1)
+## 🚀 Como rodar
 
-Decisão de produto (equipe, 2026-08-28) — **não é limitação técnica**: por enquanto o Classifier só processa candidatos a **presidente e vice-presidente**, e os partidos vinculados a eles. Não é o universo inteiro de `entidade_matching` (~1.400 registros).
-
-- Fonte: `entidade_matching` (System DB compartilhado `app_db2`, dado real do TSE), filtrada por `ds_cargo` — lista configurável em `config/settings.yaml` (`entity_scope.cargos`, hoje `["PRESIDENTE", "VICE-PRESIDENTE"]`). Implementação em `src/entities_store.py::load_active_entities_from_db`.
-- Recorte atual: **40 entidades** (26 políticos + 14 partidos), confirmado contra o banco real.
-- Ampliar o escopo (hipótese não confirmada para uma v2: governador+vice+senador) é só atualizar essa lista em `config/settings.yaml` — não exige mudança de código.
-- Risco de produto em aberto, não resolvido por esta decisão: se o `scrapping-prisma` continuar raspando notícia geral sem filtrar por presidenciável, boa parte do conteúdo raspado não vai gerar classificação nenhuma. Ver [`data/annotation/pendencias-tecnicas.md`](data/annotation/pendencias-tecnicas.md), [`docs/propostas-mudancas-scraper.md`](docs/propostas-mudancas-scraper.md) (proposta de alinhamento) e [`docs/scraper-como-atualizar-target-entities.md`](docs/scraper-como-atualizar-target-entities.md) (como o scraper recebe a lista de entidades em escopo).
-- Performance do `entity_matcher`: houve uma otimização (pré-filtro de candidatos + índice de aliases + cache de regex) que trouxe o matching de ~130ms para ~0,6ms por parágrafo em benchmark com 1.393 entidades sintéticas (~200x), depois validada com dado real do TSE (números exatos em `data/annotation/pendencias-tecnicas.md`, item 7). Com o escopo v1 atual (40 entidades) o custo é irrelevante (~0,09ms/parágrafo) — a otimização só volta a importar se o escopo crescer além da v1.
-
-### Persistência e integração
-
-- **Scraper → Classifier**: consumo via RabbitMQ, sem acesso direto ao Postgres do scraper, padrão outbox do lado do scraper. Ver [ADR 0001](docs/adr/0001-scraper-classifier-rabbitmq-outbox.md).
-- **Classifier grava em `tabela_classificacao`**, no System DB compartilhado `app_db2` (não mais nas tabelas próprias do Classifier — ver "Tabelas principais" abaixo).
-- **Classifier → Analyser**: outbox transacional próprio (`classifier_analyser_outbox`, tabela de uso interno do Classifier dentro do `app_db2` — não faz parte do modelo de dados compartilhado). `src/message_handler.py` grava o payload de notificação nessa tabela NA MESMA transação do `INSERT` em `tabela_classificacao`, antes do commit — nunca publica no RabbitMQ diretamente. Um processo separado, `src/notify_analyser.py` (agendável via cron), drena as linhas pendentes e publica de fato no RabbitMQ, com retry (`attempts`/`max_attempts`) e circuit breaker de falhas consecutivas. Essa é a decisão vigente (ADR 0004) — supera a publicação direta e síncrona da ADR 0003 (que perdia notificação silenciosamente se o RabbitMQ estivesse fora do ar no momento da publicação) sem repetir o impasse da ADR 0002 (lá, o outbox seria uma tabela do schema *compartilhado*, sem dono definido; aqui é uma tabela de uso exclusivo do Classifier). Formato do payload já é contrato fechado do lado do Classifier (decisão da Bea, 2026-08-29 — ver "Decisões em aberto" abaixo); nome de fila/exchange **ainda não confirmado com o DevOps**. Ver [ADR 0002](docs/adr/0002-system-db-compartilhado-outbox-analyser.md) e [ADR 0003](docs/adr/0003-notificacao-analyser-publicacao-direta.md) (contexto histórico) e [ADR 0004](docs/adr/0004-outbox-proprio-para-notificacao-analyser.md) (decisão vigente).
-- `src/notify_analyser.py`, `src/notification_publisher.py` e `src/notifications_store.py` foram reativados e adaptados para `classifier_analyser_outbox` — fazem parte do fluxo de produção de novo. Agendamento (CronJob em Kubernetes) fica por conta do time de infra — não é mais pendência deste repositório (ver "Decisões em aberto" abaixo).
-
-Em produção o Classifier não declara/cria topologia nenhuma no RabbitMQ (nem para consumo, nem para notificação) — isso é responsabilidade do DevOps. O RabbitMQ do `docker-compose.yml` é só para desenvolvimento local e já sobe com a topologia provisionada (ver [`docker/rabbitmq/README.md`](docker/rabbitmq/README.md)).
-
-### Configuração versionada (`config/`)
-
-- `config/entities.yaml` — YAML legado, curado manualmente. **Não é mais a fonte usada em produção** desde a migração para `entidade_matching` (ver "Escopo de entidades (v1)" acima) — hoje só alimenta scripts de benchmark/anotação (`scripts/benchmark_entity_matcher.py`, `scripts/build_annotation_batches.py`). Ver comentário de topo em `src/main.py`.
-- `config/lexicon.yaml` — lista artesanal de termos positivos/negativos em PT-BR. Não é um léxico validado academicamente (não é SentiLex-PT nem OpLexicon) — é ponto de partida da baseline.
-- `config/settings.yaml` — threshold do fuzzy matching, escopo de cargos filtrados em `entidade_matching` (`entity_scope.cargos`), nome/versão do modelo gravados em cada execução, caminho do arquivo de log.
-
-### Tabelas principais
-
-Em **produção**, o Classifier grava em `tabela_classificacao` (System DB compartilhado `app_db2`, schema gerenciado por outra pessoa da equipe via DBeaver — não faz parte de `db/migrations/` deste repositório). Uma linha por (parágrafo, entidade) identificada, com FK para `tabela_politico`/`tabela_partido`/`tabela_midia`, categoria, confiança, evidência (`paragrafo_analisado`) e auditoria de match (`evidencia_match`). Idempotência via `ON CONFLICT` na constraint `uq_tabela_classificacao_idempotencia` (article + parágrafo + entidade + pipeline_version) — ver `src/classification_store.py::persist_classification_result_v2`.
-
-`db/migrations/` (aplicadas só em `classifier_test`, nunca em `app_db2`) cobrem duas coisas:
-
-- `0001`-`0004` — schema ANTIGO e órfão do Classifier (`political_entities`, `classification_runs`, `classifications`, `analyser_notifications`) — não é mais gravado em produção, mantido por não haver necessidade comprovada de removê-lo agora.
-- `0005` — réplica **só para teste** do schema novo confirmado em `app_db2` (`tabela_classificacao`, `tabela_midia`, `tabela_politico`, `tabela_partido`) — permite testar `persist_classification_result_v2`/`resolve_id_midia` isolado, sem depender de rede até o banco real. Mantida manualmente em sincronia com o schema real; não há automação ligando os dois hoje.
-- `0006` — réplica **só para teste** de `classifier_analyser_outbox` (ver ADR 0004) — mesma lógica da `0005`: a tabela real é criada manualmente em `app_db2` (`scripts/sql/003_classifier_analyser_outbox.sql`), não por estas migrations.
-
-## Como rodar localmente
-
-Pré-requisitos:
-
-- Python 3.14 (confirmado no `.venv` deste repositório)
-- Docker (para subir Postgres e RabbitMQ localmente via `docker-compose.yml`)
-
-Passos:
+**Pré-requisitos:** Python 3.14 e Docker.
 
 ```bash
-# 1. Copiar o .env de exemplo e ajustar valores conforme necessário
+git clone git@github.com:prisma-projetos/classifier-prisma.git
+cd classifier-prisma
+
 cp .env.example .env
+docker compose up -d                 # Postgres + RabbitMQ (UI em http://localhost:15672)
 
-# 2. Subir Postgres e RabbitMQ locais
-docker compose up -d
-
-# 3. Criar/ativar um virtualenv e instalar dependências
-python3.14 -m venv .venv
-source .venv/bin/activate
+python3.14 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 
-# 4. Rodar o consumidor (processo contínuo — fica no ar consumindo a fila do
-# Scraper, classifica, persiste em tabela_classificacao e enfileira a
-# notificação pendente em classifier_analyser_outbox, na mesma transação —
-# ver ADR 0004)
-python src/main.py
+python src/main.py                   # consumidor contínuo
+python src/notify_analyser.py        # drena o outbox (rode quando quiser publicar)
 ```
 
-`src/notify_analyser.py` é o segundo processo de produção ("roda uma vez e sai") — drena `classifier_analyser_outbox` e publica de fato no RabbitMQ. Em produção o agendamento é um CronJob em Kubernetes, gerenciado pelo time de infra; localmente, rode manualmente sempre que quiser drenar o outbox — sem isso, as notificações ficam acumuladas como `pending`:
+> Se você já tem um Postgres local na porta `5432`, suba só o broker com `docker compose up -d rabbitmq` e aponte `POSTGRES_HOST`/`POSTGRES_PORT` para o banco existente.
+
+<details>
+<summary><b>Com Docker</b></summary>
 
 ```bash
-python src/notify_analyser.py
+docker build -f docker/Dockerfile -t classifier-prisma .
+docker run --rm --env-file .env classifier-prisma                          # consumidor
+docker run --rm --env-file .env classifier-prisma python notify_analyser.py # outbox
 ```
 
-Em produção o consumidor (`src/main.py`) **não** roda migrations do System DB (`app_db2` é gerenciado por outra pessoa da equipe, ver comentário no próprio arquivo) — só em `classifier_test`, via `tests/conftest.py`.
+A imagem usa `python:3.14-slim`, roda com usuário não-root e tem `WORKDIR /app/src`.
 
-**Se você já tem um Postgres local (ex.: instalado via Homebrew, ouvindo em `5432`)**: `docker compose up -d` sobe um SEGUNDO Postgres no mesmo host/porta, e qual dos dois efetivamente atende `localhost:5432` fica ambíguo (depende de como o Docker Desktop/OrbStack expõe a porta). Nesse caso, suba só o RabbitMQ (`docker compose up -d rabbitmq`) e use o Postgres que já está rodando — ele funciona normalmente, o classifier só precisa que `POSTGRES_HOST`/`POSTGRES_PORT` no `.env` apontem pra ele.
+</details>
 
-## Variáveis de ambiente
-
-Todas descritas com comentário completo em [`.env.example`](.env.example). Resumo:
-
-**Postgres (System DB)**
-- `POSTGRES_HOST`, `POSTGRES_PORT`, `POSTGRES_DB`, `POSTGRES_USER`, `POSTGRES_PASSWORD` — conexão com o banco compartilhado (Classifier grava resultado; Analyser e API o lerão depois).
-- `POSTGRES_TEST_DB` — banco lógico separado usado pelos testes, mesmo servidor.
-
-**RabbitMQ — consumo da fila do Scraper** (nomes já confirmados com o DevOps)
-- `RABBITMQ_HOST`, `RABBITMQ_PORT`, `RABBITMQ_VHOST` — conexão com o broker.
-- `RABBITMQ_MANAGEMENT_PORT` — porta da UI de management do RabbitMQ local (`docker-compose.yml`, container `rabbitmq:3-management`), só para desenvolvimento — inspecionar filas em `http://localhost:15672`. Não existe em produção.
-- `RABBITMQ_CONSUMER_USER`, `RABBITMQ_CONSUMER_PASSWORD` — credenciais de consumo (defaults `guest/guest` são só o padrão local; credenciais reais de produção ainda não confirmadas com o DevOps).
-- `RABBITMQ_CONSUMER_QUEUE` — fila de onde o Classifier consome os jobs do Scraper.
-- `RABBITMQ_CONSUMER_PREFETCH_COUNT` — quantas mensagens não confirmadas o consumidor aceita por vez.
-- `RABBITMQ_RECONNECT_DELAY_SECONDS` — intervalo de espera antes de tentar reconectar se a conexão cair.
-
-**RabbitMQ — notificação para o Analyser** (nomes ainda NÃO confirmados com o DevOps — placeholders de desenvolvimento)
-- `RABBITMQ_NOTIFIER_USER`, `RABBITMQ_NOTIFIER_PASSWORD` — credenciais de publicação.
-- `RABBITMQ_NOTIFIER_EXCHANGE`, `RABBITMQ_NOTIFIER_EXCHANGE_TYPE`, `RABBITMQ_NOTIFIER_QUEUE`, `RABBITMQ_NOTIFIER_ROUTING_KEY`, `RABBITMQ_NOTIFIER_DURABLE` — topologia usada por `src/notify_analyser.py`. Não usar esses valores como definitivos em produção sem confirmar com o DevOps antes.
-
-## Como testar
+<details>
+<summary><b>Exportar entidades para o scraper</b></summary>
 
 ```bash
+.venv/bin/python scripts/export_target_entities.py
+# → data/exports/target_entities.yaml (copiar para scrapping-prisma/config/)
+```
+
+Detalhes em [`docs/scraper-como-atualizar-target-entities.md`](docs/scraper-como-atualizar-target-entities.md).
+
+</details>
+
+## ⚙ Variáveis de ambiente
+
+Todas estão documentadas com comentários em [`.env.example`](.env.example).
+
+| Grupo | Variáveis |
+|---|---|
+| **Postgres (System DB)** | `POSTGRES_HOST`, `POSTGRES_PORT`, `POSTGRES_DB`, `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_TEST_DB` |
+| **RabbitMQ (conexão)** | `RABBITMQ_HOST`, `RABBITMQ_PORT`, `RABBITMQ_VHOST`, `RABBITMQ_MANAGEMENT_PORT` (só em dev) |
+| **Consumo (scraper → classifier)** | `RABBITMQ_CONSUMER_USER`, `RABBITMQ_CONSUMER_PASSWORD`, `RABBITMQ_CONSUMER_QUEUE`, `RABBITMQ_CONSUMER_PREFETCH_COUNT`, `RABBITMQ_RECONNECT_DELAY_SECONDS` |
+| **Notificação (classifier → analyser)** | `RABBITMQ_NOTIFIER_USER`, `RABBITMQ_NOTIFIER_PASSWORD`, `RABBITMQ_NOTIFIER_EXCHANGE`, `RABBITMQ_NOTIFIER_EXCHANGE_TYPE`, `RABBITMQ_NOTIFIER_QUEUE`, `RABBITMQ_NOTIFIER_ROUTING_KEY`, `RABBITMQ_NOTIFIER_DURABLE` |
+
+## 🧪 Testes
+
+```bash
+docker compose up -d postgres
 pytest
 ```
 
-Os testes usam um banco de teste isolado (`POSTGRES_TEST_DB`), criado e com as migrations aplicadas automaticamente pelo `tests/conftest.py` — não é preciso preparar banco manualmente, só ter Postgres no ar (`docker compose up -d`) e o `.env` configurado. As tabelas de dados são limpas (`TRUNCATE`) antes de cada teste, incluindo a réplica de teste do schema novo (`tabela_classificacao`, `tabela_midia`, `tabela_politico`, `tabela_partido` — ver `db/migrations/0005`) e a réplica de `classifier_analyser_outbox` (`db/migrations/0006`).
+- O banco de teste (`POSTGRES_TEST_DB`) é criado, migrado e truncado automaticamente pelo `tests/conftest.py`.
+- A publicação no RabbitMQ usa *fakes*: `test_message_handler.py` cobre a atomicidade entre classificação e outbox, e `test_notification_publisher.py` cobre claim, retry, circuit breaker e idempotência.
+- **Exceção:** `test_entities_store.py` lê o `app_db2` real (só leitura) para validar o recorte v1, por isso exige acesso de rede ao banco.
 
-Publicação no RabbitMQ nunca é testada contra um broker real:
-- `tests/test_message_handler.py` verifica que `handle_message` grava a linha certa em `classifier_analyser_outbox`, na mesma transação de `tabela_classificacao` (inclui um teste de atomicidade que força uma falha entre a gravação do outbox e o commit).
-- `tests/test_notification_publisher.py` injeta um publisher fake (`Publisher` Protocol) para testar claim/retry/circuit-breaker/idempotência do publisher do outbox, sem depender de infraestrutura externa.
+## 🔁 CI/CD
 
-Exceção: `tests/test_entities_store.py` conecta diretamente ao `app_db2` real (só leitura) para validar o recorte de entidades v1 contra dado de verdade — não usa `classifier_test`, porque `entidade_matching`/`tabela_candidatura` são gerenciadas fora deste repositório e não têm réplica de teste. Precisa de rede até o `app_db2` para rodar.
+`.gitea/workflows/ci-cd.yaml`: em push para `main`/`develop`, faz build da imagem → atualiza os manifestos → sincroniza no **ArgoCD**. O agendamento do `notify_analyser.py` é um CronJob do Kubernetes mantido pela infra.
 
-## Limitações conhecidas da baseline v1 (léxico/regra)
+## ⚠ Limitações da baseline v1
 
-- **Granularidade por parágrafo, não por entidade**: se duas entidades diferentes aparecem no mesmo parágrafo, ambas recebem a mesma categoria e confiança — não há atribuição fina de qual trecho se refere a qual entidade.
-- **Confiança é heurística, não probabilidade calibrada**: `|positivos - negativos| / (positivos + negativos)`, sem qualquer validação estatística.
-- **Só suporta `content_type = news_article`**. Outro tipo de conteúdo levanta erro explícito (`UnsupportedContentTypeError`) em vez de cair silenciosamente na estratégia de parágrafo.
-- **Não considera negação, ironia, citação de terceiros ou comparação** — conta termos positivos/negativos no parágrafo inteiro, sem entender contexto.
-- **Identificação de entidade não é NER**: depende da lista carregada de `entidade_matching`, já filtrada pelo escopo v1 (match exato + fuzzy). Entidade fora desse recorte (ex.: um deputado, ou um presidenciável fora dos `ds_cargo` configurados) não é identificada.
+- **Granularidade por parágrafo:** duas entidades no mesmo parágrafo recebem a mesma categoria.
+- **Não trata** negação, ironia, citação de terceiros nem comparação.
+- **Matching por aliases:** entidades fora do escopo ou formas curtas sem alias (como "Flávio" ou "Caiado") não são detectadas.
+- **Mapeamento de veículo:** só cerca de 33,5% dos `source_name` coletados batem com `tabela_midia`, e o restante fica com `id_midia` nulo.
+- A baseline serve para validar o pipeline de ponta a ponta e como referência de comparação. Os experimentos do artigo medem esses limites: veja [`experiments-prisma`](https://github.com/prisma-projetos/experiments-prisma).
 
-Essa baseline existe para validar o pipeline ponta a ponta e servir de referência de comparação para uma técnica melhor (fase 2 planejada: LSTM com embeddings pré-treinados em português).
+Decisões em aberto e próximos passos: [`context.md` § 9](context.md#9-decisões-em-aberto-específicas-deste-repositório) e [`data/annotation/pendencias-tecnicas.md`](data/annotation/pendencias-tecnicas.md).
 
-## Decisões em aberto / próximos passos
+## 📚 Documentação
 
-Ver [`context.md`, seção 9](context.md#9-decisões-em-aberto-específicas-deste-repositório) — inclui a técnica de classificação definitiva pós-baseline, correferência de entidade, dono das migrations do System DB quando o Analyser existir, e confirmação com o DevOps do nome da fila/exchange da notificação Classifier→Analyser.
+| Documento | Conteúdo |
+|---|---|
+| [`context.md`](context.md) | Responsabilidades, contrato de saída, regras, riscos e decisões |
+| [`docs/adr/`](docs/adr/) | Decisões de arquitetura 0001–0004 |
+| [`docs/dicionario-dados-analyser.md`](docs/dicionario-dados-analyser.md) | Contrato do payload enviado ao analyser |
+| [`docs/protocolo-anotacao-v2.md`](docs/protocolo-anotacao-v2.md) | Regras de anotação do gold standard |
+| [`docs/propostas-mudancas-scraper.md`](docs/propostas-mudancas-scraper.md) | Alinhamento de escopo com o scraper |
+| [`experiments/README.md`](experiments/README.md) | Ferramentas e resultados do artigo |
 
-**Formato do payload de notificação está fechado** (decisão da Bea, 2026-08-29): o modelo de dados do Classifier (`tabela_classificacao` + payload de `src/analyser_notifier.py::build_notification_payload`, documentado em [`docs/dicionario-dados-analyser.md`](docs/dicionario-dados-analyser.md)) é a referência fixa — quem construir o Analyser adapta o próprio consumo a esse formato, não o contrário. Não é mais pendência deste lado.
+## 🧭 Repositórios do PRISMA
 
-**Agendamento de `src/notify_analyser.py` também está resolvido**: fica por conta do time de infra (CronJob em Kubernetes, configurado manualmente no Gitea) — não é mais pendência deste repositório.
-
-Pendências que continuam reais (ver [ADR 0003](docs/adr/0003-notificacao-analyser-publicacao-direta.md) e [ADR 0004](docs/adr/0004-outbox-proprio-para-notificacao-analyser.md)):
-
-- Nome de fila/exchange/routing key da fronteira Classifier→Analyser ainda não confirmados com o DevOps.
-- `notificado_em` no payload reflete "quando a classificação foi enfileirada", não "quando foi de fato publicada no RabbitMQ" (pode haver atraso, ver ADR 0004) — já está documentado no dicionário de dados entregue, mas vale reforçar se o time do Analyser tiver dúvida.
-- Mapeamento `ScraperPayload.source_name` → `tabela_midia.nome_midia` (`src/classification_store.py::resolve_id_midia`) usa lookup exato case-insensitive. Medido contra dado real (2026-08-29): só **33,5%** dos `source_name` reais já coletados (181/540) batem com o cadastro atual de `tabela_midia` (10 veículos) — a maioria fica com `id_midia` nulo (não bloqueia nada, mas é limitação conhecida até alguém investir em cadastrar mais veículos ou melhorar o lookup).
-
-## Estrutura de pastas
-
-```
-config/          Entidades, léxico e configurações versionadas (YAML)
-db/migrations/   Migrations SQL do System DB, numeradas
-docker/rabbitmq/ Topologia do RabbitMQ para desenvolvimento local (docker-compose)
-docs/adr/        Decisões de arquitetura registradas
-src/             Código do consumidor, publisher, pipeline de classificação e acesso a dados
-tests/           Testes automatizados (pytest), incluindo setup do banco de teste
-logs/            Log de execução (não versionado)
-```
+| Repositório | Papel |
+|---|---|
+| [`.github`](https://github.com/prisma-projetos) | Página da organização |
+| [`scrapping-prisma`](https://github.com/prisma-projetos/scrapping-prisma) | 📰 Coleta de notícias |
+| **`classifier-prisma`** | 🏷 Identificação de entidades e classificação do teor *(este)* |
+| [`analyser-prisma`](https://github.com/prisma-projetos/analyser-prisma) | 🧠 Resumos e panoramas com LLM |
+| [`api-prisma`](https://github.com/prisma-projetos/api-prisma) | 🔌 API REST somente leitura |
+| [`app-prisma`](https://github.com/prisma-projetos/app-prisma) | 🖥 Interface web |
+| [`experiments-prisma`](https://github.com/prisma-projetos/experiments-prisma) | 🔬 Documentação, ADRs e experimentos do artigo |
